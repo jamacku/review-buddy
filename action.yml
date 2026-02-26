@@ -1,15 +1,43 @@
-name: Your name here
-description: Provide a description here
+name: Review Buddy
+description: >-
+  AI-powered CI failure reviewer that analyzes workflow logs and PR diffs
+  using Google Gemini to provide actionable code review comments.
 
 branding:
   color: blue
-  icon: activity
+  icon: message-circle
 
 inputs:
-  milliseconds:
+  pr-metadata:
     required: true
-    description: input description here
-    default: default value if applicable
+    description: >-
+      Stringified JSON Pull Request metadata from
+      gather-pull-request-metadata action.
+  token:
+    required: true
+    description: >-
+      GitHub token with permissions to read actions logs and
+      create pull request reviews (actions:read, pull-requests:write).
+  gemini-api-key:
+    required: true
+    description: Google Gemini API key for AI analysis.
+  model:
+    required: false
+    default: 'gemini-2.5-flash'
+    description: >-
+      Gemini model identifier to use for analysis
+      (e.g. gemini-2.5-flash, gemini-2.5-pro).
+  review-event:
+    required: false
+    default: 'COMMENT'
+    description: >-
+      The review event type when posting the review.
+      One of: COMMENT, REQUEST_CHANGES.
+
+outputs:
+  status:
+    description: >-
+      Markdown status message for use with issue-commentator.
 
 runs:
   using: node24

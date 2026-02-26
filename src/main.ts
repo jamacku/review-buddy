@@ -1,20 +1,18 @@
-import { getInput, setFailed, setOutput } from '@actions/core';
+import { setFailed, setOutput } from '@actions/core';
 
 import '@total-typescript/ts-reset';
 
 import action from './action';
 import { getOctokit } from './octokit';
+import { getConfig } from './config';
 import { ActionError } from './error';
 
-const octokit = getOctokit(getInput('token', { required: true }));
+const config = getConfig();
+const octokit = getOctokit(config.token);
 
 try {
-  let message = await action(
-    octokit,
-    +getInput('milliseconds', { required: true })
-  );
-
-  setOutput('status', JSON.stringify(message));
+  const status = await action(octokit, config);
+  setOutput('status', status);
 } catch (error) {
   let message: string;
 
@@ -24,9 +22,8 @@ try {
     message = JSON.stringify(error);
   }
 
-  // set status output only if error was thrown by us
   if (error instanceof ActionError) {
-    setOutput('status', JSON.stringify(message));
+    setOutput('status', message);
   }
 
   setFailed(message);

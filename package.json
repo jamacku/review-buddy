@@ -1,7 +1,7 @@
 {
-  "name": "typescript-action",
+  "name": "review-buddy",
   "version": "1.0.0",
-  "description": "TypeScript template action",
+  "description": "AI-powered CI failure reviewer using Google Gemini",
   "main": "src/main.ts",
   "scripts": {
     "build": "esbuild ./src/main.ts --bundle --outdir=dist --platform=node --target=node20.0.0 --format=esm --packages=bundle --banner:js=\"import{createRequire}from'module';const require=createRequire(import.meta.url);\"",
@@ -13,7 +13,7 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/redhat-plumbers-in-action/typescript-action.git"
+    "url": "git+https://github.com/redhat-plumbers-in-action/review-buddy.git"
   },
   "keywords": [
     "actions",
@@ -27,9 +27,11 @@
   "dependencies": {
     "@actions/core": "^3.0.0",
     "@actions/github": "^9.0.0",
+    "@google/genai": "^1.43.0",
     "@octokit/core": "^7.0.6",
     "@octokit/plugin-throttling": "^11.0.3",
-    "@probot/octokit-plugin-config": "^4.1.0"
+    "@probot/octokit-plugin-config": "^4.1.0",
+    "zod": "^4.3.6"
   },
   "devDependencies": {
     "@total-typescript/ts-reset": "^0.6.1",
