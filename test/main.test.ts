@@ -162,7 +162,7 @@ describe('buildPrompt', () => {
       },
     ];
 
-    const prompt = buildPrompt(diff, jobs);
+    const prompt = buildPrompt(diff, jobs, []);
     expect(prompt).toContain(diff);
     expect(prompt).toContain('Error: test failed');
     expect(prompt).toContain('Failed Job: "test"');
@@ -175,17 +175,46 @@ describe('buildPrompt', () => {
       { id: 2, name: 'test', conclusion: 'failure', logs: 'test error' },
     ];
 
-    const prompt = buildPrompt(diff, jobs);
+    const prompt = buildPrompt(diff, jobs, []);
     expect(prompt).toContain('Failed Job: "lint"');
     expect(prompt).toContain('Failed Job: "test"');
     expect(prompt).toContain('lint error');
     expect(prompt).toContain('test error');
   });
 
+  test('includes external CI failures', () => {
+    const prompt = buildPrompt(
+      'diff',
+      [],
+      [
+        {
+          name: 'CentOS CI',
+          description: 'build failed',
+          url: 'https://jenkins.example.com/job/123/',
+          source: 'status',
+        },
+        {
+          name: 'rpm-build:centos-9',
+          description: 'RPM build error',
+          url: 'https://dashboard.packit.dev/jobs/copr/123',
+          source: 'check-run',
+        },
+      ]
+    );
+    expect(prompt).toContain('CentOS CI');
+    expect(prompt).toContain('build failed');
+    expect(prompt).toContain('https://jenkins.example.com/job/123/');
+    expect(prompt).toContain('Commit Status');
+    expect(prompt).toContain('rpm-build:centos-9');
+    expect(prompt).toContain('Check Run');
+  });
+
   test('includes JSON output format instructions', () => {
-    const prompt = buildPrompt('diff', [
-      { id: 1, name: 'test', conclusion: 'failure', logs: 'error' },
-    ]);
+    const prompt = buildPrompt(
+      'diff',
+      [{ id: 1, name: 'test', conclusion: 'failure', logs: 'error' }],
+      []
+    );
     expect(prompt).toContain('"summary"');
     expect(prompt).toContain('"comments"');
     expect(prompt).toContain('"confidence"');
@@ -255,6 +284,8 @@ describe('getConfig', () => {
 
 vi.mock('../src/github', () => ({
   getFailedJobs: vi.fn(),
+  getFailedCheckRuns: vi.fn().mockResolvedValue([]),
+  getFailedCommitStatuses: vi.fn().mockResolvedValue([]),
   getPullRequestDiff: vi.fn(),
   truncateDiff: vi.fn((diff: string) => diff),
   createPullRequestReview: vi.fn(),
@@ -278,7 +309,7 @@ vi.mock('@actions/github', async importOriginal => {
       ...original.context,
       repo: { owner: 'test-owner', repo: 'test-repo' },
       payload: {
-        workflow_run: { id: 12345 },
+        workflow_run: { head_sha: 'abc1234567890' },
       },
     },
   };

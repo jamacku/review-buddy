@@ -79,3 +79,10 @@ export interface FailedJob {
   conclusion: string;
   logs: string;
 }
+
+export interface ExternalFailure {
+  name: string;
+  description: string;
+  url: string;
+  source: 'check-run' | 'status';
+}

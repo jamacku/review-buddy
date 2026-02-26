@@ -1,7 +1,9 @@
-import { describe, expect, test, vi, beforeEach } from 'vitest';
+import { describe, expect, test, vi } from 'vitest';
 
 import {
   getFailedJobs,
+  getFailedCheckRuns,
+  getFailedCommitStatuses,
   getPullRequestDiff,
   truncateDiff,
   createPullRequestReview,
@@ -13,15 +15,13 @@ vi.mock('@actions/core', () => ({
   warning: vi.fn(),
 }));
 
-function mockOctokit(responses: Record<string, unknown>) {
+// Helper to create a mock octokit that routes requests
+function createMockOctokit(handler: (route: string) => unknown) {
   return {
     request: vi.fn((route: string) => {
-      for (const [pattern, data] of Object.entries(responses)) {
-        if (route.includes(pattern)) {
-          return Promise.resolve({ data });
-        }
-      }
-      return Promise.reject(new Error(`Unexpected request: ${route}`));
+      const data = handler(route);
+      if (data instanceof Error) return Promise.reject(data);
+      return Promise.resolve({ data });
     }),
   } as unknown as CustomOctokit;
 }
@@ -29,20 +29,89 @@ function mockOctokit(responses: Record<string, unknown>) {
 // --- getFailedJobs ---
 
 describe('getFailedJobs', () => {
-  test('returns failed jobs with logs', async () => {
+  test('collects failed jobs across multiple workflow runs', async () => {
+    const octokit = {
+      request: vi.fn((route: string, params?: Record<string, unknown>) => {
+        if (route.includes('/actions/runs') && !route.includes('/jobs')) {
+          return Promise.resolve({
+            data: {
+              workflow_runs: [
+                { id: 100, name: 'CI' },
+                { id: 200, name: 'Lint' },
+              ],
+            },
+          });
+        }
+        if (route.includes('/jobs')) {
+          const runId = params?.run_id;
+          if (runId === 100) {
+            return Promise.resolve({
+              data: {
+                jobs: [
+                  { id: 1, name: 'build', conclusion: 'success' },
+                  { id: 2, name: 'test', conclusion: 'failure' },
+                ],
+              },
+            });
+          }
+          if (runId === 200) {
+            return Promise.resolve({
+              data: {
+                jobs: [{ id: 3, name: 'eslint', conclusion: 'failure' }],
+              },
+            });
+          }
+        }
+        if (route.includes('/logs')) {
+          return Promise.resolve({ data: 'log output' });
+        }
+        return Promise.reject(new Error(`Unexpected: ${route}`));
+      }),
+    } as unknown as CustomOctokit;
+
+    const result = await getFailedJobs(octokit, 'owner', 'repo', 'abc123');
+
+    expect(result).toHaveLength(2);
+    expect(result[0]).toEqual({
+      id: 2,
+      name: 'CI / test',
+      conclusion: 'failure',
+      logs: 'log output',
+    });
+    expect(result[1]).toEqual({
+      id: 3,
+      name: 'Lint / eslint',
+      conclusion: 'failure',
+      logs: 'log output',
+    });
+  });
+
+  test('returns empty array when no workflow runs failed', async () => {
+    const octokit = createMockOctokit(route => {
+      if (route.includes('/actions/runs')) {
+        return { workflow_runs: [] };
+      }
+      throw new Error(`Unexpected: ${route}`);
+    });
+
+    const result = await getFailedJobs(octokit, 'owner', 'repo', 'abc123');
+    expect(result).toEqual([]);
+  });
+
+  test('returns empty array when failed runs have no failed jobs', async () => {
     const octokit = {
       request: vi.fn((route: string) => {
-        if (route.includes('/logs')) {
-          return Promise.resolve({ data: 'log output for job' });
+        if (route.includes('/actions/runs') && !route.includes('/jobs')) {
+          return Promise.resolve({
+            data: {
+              workflow_runs: [{ id: 100, name: 'CI' }],
+            },
+          });
         }
         if (route.includes('/jobs')) {
           return Promise.resolve({
             data: {
-              jobs: [
-                { id: 1, name: 'build', conclusion: 'success' },
-                { id: 2, name: 'test', conclusion: 'failure' },
-                { id: 3, name: 'lint', conclusion: 'failure' },
-              ],
+              jobs: [{ id: 1, name: 'test', conclusion: 'success' }],
             },
           });
         }
@@ -50,53 +119,17 @@ describe('getFailedJobs', () => {
       }),
     } as unknown as CustomOctokit;
 
-    const result = await getFailedJobs(octokit, 'owner', 'repo', 100);
-
-    expect(result).toHaveLength(2);
-    expect(result[0]).toEqual({
-      id: 2,
-      name: 'test',
-      conclusion: 'failure',
-      logs: 'log output for job',
-    });
-    expect(result[1]).toEqual({
-      id: 3,
-      name: 'lint',
-      conclusion: 'failure',
-      logs: 'log output for job',
-    });
-  });
-
-  test('returns empty array when no jobs failed', async () => {
-    const octokit = mockOctokit({
-      '/jobs': {
-        jobs: [
-          { id: 1, name: 'build', conclusion: 'success' },
-          { id: 2, name: 'test', conclusion: 'success' },
-        ],
-      },
-    });
-
-    const result = await getFailedJobs(octokit, 'owner', 'repo', 100);
-    expect(result).toEqual([]);
-  });
-
-  test('returns empty array when jobs list is empty', async () => {
-    const octokit = mockOctokit({
-      '/jobs': { jobs: [] },
-    });
-
-    const result = await getFailedJobs(octokit, 'owner', 'repo', 100);
+    const result = await getFailedJobs(octokit, 'owner', 'repo', 'abc123');
     expect(result).toEqual([]);
   });
 
   test('skips jobs where log fetching fails', async () => {
-    let callCount = 0;
+    let logCallCount = 0;
     const octokit = {
       request: vi.fn((route: string) => {
         if (route.includes('/logs')) {
-          callCount++;
-          if (callCount === 1) {
+          logCallCount++;
+          if (logCallCount === 1) {
             return Promise.reject(new Error('404 Not Found'));
           }
           return Promise.resolve({ data: 'success log' });
@@ -111,14 +144,21 @@ describe('getFailedJobs', () => {
             },
           });
         }
+        if (route.includes('/actions/runs')) {
+          return Promise.resolve({
+            data: {
+              workflow_runs: [{ id: 100, name: 'CI' }],
+            },
+          });
+        }
         return Promise.reject(new Error(`Unexpected: ${route}`));
       }),
     } as unknown as CustomOctokit;
 
-    const result = await getFailedJobs(octokit, 'owner', 'repo', 100);
+    const result = await getFailedJobs(octokit, 'owner', 'repo', 'abc123');
 
     expect(result).toHaveLength(1);
-    expect(result[0].name).toBe('test-b');
+    expect(result[0].name).toBe('CI / test-b');
   });
 
   test('truncates long logs', async () => {
@@ -135,15 +175,21 @@ describe('getFailedJobs', () => {
             },
           });
         }
+        if (route.includes('/actions/runs')) {
+          return Promise.resolve({
+            data: {
+              workflow_runs: [{ id: 100, name: 'CI' }],
+            },
+          });
+        }
         return Promise.reject(new Error(`Unexpected: ${route}`));
       }),
     } as unknown as CustomOctokit;
 
-    const result = await getFailedJobs(octokit, 'owner', 'repo', 100);
+    const result = await getFailedJobs(octokit, 'owner', 'repo', 'abc123');
 
     expect(result[0].logs.length).toBeLessThan(longLog.length);
     expect(result[0].logs).toContain('truncated');
-    // Should keep the tail of the logs
     expect(result[0].logs.endsWith('x')).toBe(true);
   });
 
@@ -160,60 +206,19 @@ describe('getFailedJobs', () => {
             },
           });
         }
+        if (route.includes('/actions/runs')) {
+          return Promise.resolve({
+            data: {
+              workflow_runs: [{ id: 100, name: 'CI' }],
+            },
+          });
+        }
         return Promise.reject(new Error(`Unexpected: ${route}`));
       }),
     } as unknown as CustomOctokit;
 
-    const result = await getFailedJobs(octokit, 'owner', 'repo', 100);
+    const result = await getFailedJobs(octokit, 'owner', 'repo', 'abc123');
     expect(result[0].logs).toBe('12345');
-  });
-
-  test('handles null conclusion as failure', async () => {
-    const octokit = {
-      request: vi.fn((route: string) => {
-        if (route.includes('/logs')) {
-          return Promise.resolve({ data: 'log' });
-        }
-        if (route.includes('/jobs')) {
-          return Promise.resolve({
-            data: {
-              jobs: [{ id: 1, name: 'test', conclusion: null }],
-            },
-          });
-        }
-        return Promise.reject(new Error(`Unexpected: ${route}`));
-      }),
-    } as unknown as CustomOctokit;
-
-    // Jobs with null conclusion don't match 'failure' filter, so empty
-    const result = await getFailedJobs(octokit, 'owner', 'repo', 100);
-    expect(result).toEqual([]);
-  });
-
-  test('uses fallback conclusion when job conclusion is null', async () => {
-    // This tests the ?? 'failure' fallback in the push statement.
-    // We mock at a lower level to test the internal behavior:
-    // If a job somehow passes the filter with null conclusion,
-    // the result should use 'failure' as default.
-    const octokit = {
-      request: vi.fn((route: string) => {
-        if (route.includes('/logs')) {
-          return Promise.resolve({ data: 'log data' });
-        }
-        if (route.includes('/jobs')) {
-          // Return a job where conclusion is 'failure' to pass the filter
-          return Promise.resolve({
-            data: {
-              jobs: [{ id: 1, name: 'test', conclusion: 'failure' }],
-            },
-          });
-        }
-        return Promise.reject(new Error(`Unexpected: ${route}`));
-      }),
-    } as unknown as CustomOctokit;
-
-    const result = await getFailedJobs(octokit, 'owner', 'repo', 100);
-    expect(result[0].conclusion).toBe('failure');
   });
 });
 
@@ -280,6 +285,156 @@ describe('truncateDiff', () => {
   });
 });
 
+// --- getFailedCheckRuns ---
+
+describe('getFailedCheckRuns', () => {
+  test('returns failed check runs excluding github-actions', async () => {
+    const octokit = createMockOctokit(route => {
+      if (route.includes('/check-runs')) {
+        return {
+          check_runs: [
+            {
+              name: 'rpm-build',
+              conclusion: 'failure',
+              app: { slug: 'packit-as-a-service' },
+              details_url: 'https://dashboard.packit.dev/123',
+              output: { summary: 'RPM build failed' },
+            },
+            {
+              name: 'build (gcc)',
+              conclusion: 'failure',
+              app: { slug: 'github-actions' },
+              details_url: 'https://github.com/...',
+              output: { summary: null },
+            },
+            {
+              name: 'CodeQL',
+              conclusion: 'success',
+              app: { slug: 'github-advanced-security' },
+              details_url: 'https://github.com/...',
+              output: { summary: null },
+            },
+          ],
+        };
+      }
+      throw new Error(`Unexpected: ${route}`);
+    });
+
+    const result = await getFailedCheckRuns(octokit, 'owner', 'repo', 'abc123');
+
+    expect(result).toHaveLength(1);
+    expect(result[0]).toEqual({
+      name: 'rpm-build',
+      description: 'RPM build failed',
+      url: 'https://dashboard.packit.dev/123',
+      source: 'check-run',
+    });
+  });
+
+  test('returns empty array when no check runs failed', async () => {
+    const octokit = createMockOctokit(route => {
+      if (route.includes('/check-runs')) {
+        return {
+          check_runs: [
+            {
+              name: 'test',
+              conclusion: 'success',
+              app: { slug: 'packit' },
+              details_url: null,
+              output: { summary: null },
+            },
+          ],
+        };
+      }
+      throw new Error(`Unexpected: ${route}`);
+    });
+
+    const result = await getFailedCheckRuns(octokit, 'owner', 'repo', 'abc123');
+    expect(result).toEqual([]);
+  });
+});
+
+// --- getFailedCommitStatuses ---
+
+describe('getFailedCommitStatuses', () => {
+  test('returns failed and error commit statuses', async () => {
+    const octokit = createMockOctokit(route => {
+      if (route.includes('/status')) {
+        return {
+          statuses: [
+            {
+              context: 'CentOS CI (Stream 9)',
+              state: 'failure',
+              description: 'build failed',
+              target_url: 'https://jenkins.example.com/job/123/',
+            },
+            {
+              context: 'CentOS CI (sanitizers)',
+              state: 'error',
+              description: 'infrastructure error',
+              target_url: 'https://jenkins.example.com/job/456/',
+            },
+            {
+              context: 'Other CI',
+              state: 'success',
+              description: 'build passed',
+              target_url: 'https://ci.example.com/789/',
+            },
+          ],
+        };
+      }
+      throw new Error(`Unexpected: ${route}`);
+    });
+
+    const result = await getFailedCommitStatuses(
+      octokit,
+      'owner',
+      'repo',
+      'abc123'
+    );
+
+    expect(result).toHaveLength(2);
+    expect(result[0]).toEqual({
+      name: 'CentOS CI (Stream 9)',
+      description: 'build failed',
+      url: 'https://jenkins.example.com/job/123/',
+      source: 'status',
+    });
+    expect(result[1]).toEqual({
+      name: 'CentOS CI (sanitizers)',
+      description: 'infrastructure error',
+      url: 'https://jenkins.example.com/job/456/',
+      source: 'status',
+    });
+  });
+
+  test('returns empty array when all statuses pass', async () => {
+    const octokit = createMockOctokit(route => {
+      if (route.includes('/status')) {
+        return {
+          statuses: [
+            {
+              context: 'CI',
+              state: 'success',
+              description: 'ok',
+              target_url: null,
+            },
+          ],
+        };
+      }
+      throw new Error(`Unexpected: ${route}`);
+    });
+
+    const result = await getFailedCommitStatuses(
+      octokit,
+      'owner',
+      'repo',
+      'abc123'
+    );
+    expect(result).toEqual([]);
+  });
+});
+
 // --- createPullRequestReview ---
 
 describe('createPullRequestReview', () => {
@@ -325,7 +480,12 @@ describe('createPullRequestReview', () => {
         event: 'COMMENT',
         comments: [
           { path: 'src/app.ts', line: 10, side: 'RIGHT', body: 'Fix this' },
-          { path: 'src/util.ts', line: 20, side: 'RIGHT', body: 'And this' },
+          {
+            path: 'src/util.ts',
+            line: 20,
+            side: 'RIGHT',
+            body: 'And this',
+          },
         ],
       }
     );

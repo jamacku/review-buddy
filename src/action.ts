@@ -5,6 +5,8 @@ import type { CustomOctokit } from './octokit';
 import { GeminiClient } from './gemini';
 import {
   getFailedJobs,
+  getFailedCheckRuns,
+  getFailedCommitStatuses,
   getPullRequestDiff,
   truncateDiff,
   createPullRequestReview,
@@ -19,26 +21,38 @@ export default async function action(
   const { prMetadata, owner, repo, geminiApiKey, model, reviewEvent } = config;
   const { number: pullNumber, ref: commitId } = prMetadata;
 
-  info(`Analyzing PR #${pullNumber} (commit: ${commitId.slice(0, 7)})`);
+  const headSha = getHeadSha();
 
-  const runId = getWorkflowRunId();
+  info(`Analyzing PR #${pullNumber} (commit: ${headSha.slice(0, 7)})`);
 
   info('Fetching failed CI job logs...');
-  const failedJobs = await getFailedJobs(octokit, owner, repo, runId);
+  const [failedJobs, failedCheckRuns, failedStatuses] = await Promise.all([
+    getFailedJobs(octokit, owner, repo, headSha),
+    getFailedCheckRuns(octokit, owner, repo, headSha),
+    getFailedCommitStatuses(octokit, owner, repo, headSha),
+  ]);
 
-  if (failedJobs.length === 0) {
+  const externalFailures = [...failedCheckRuns, ...failedStatuses];
+  const totalFailures = failedJobs.length + externalFailures.length;
+
+  if (totalFailures === 0) {
     info('No failed jobs found. Nothing to review.');
     return formatStatus(null);
   }
 
   info(`Found ${failedJobs.length} failed job(s)`);
+  if (externalFailures.length > 0) {
+    info(
+      `Found ${externalFailures.length} external CI failure(s): ${externalFailures.map(f => f.name).join(', ')}`
+    );
+  }
 
   info('Fetching PR diff...');
   const rawDiff = await getPullRequestDiff(octokit, owner, repo, pullNumber);
   const diff = truncateDiff(rawDiff);
   info(`PR diff: ${rawDiff.length} chars (${diff.length} after truncation)`);
 
-  const prompt = buildPrompt(diff, failedJobs);
+  const prompt = buildPrompt(diff, failedJobs, externalFailures);
   info(`Prompt size: ${prompt.length} chars`);
 
   const gemini = new GeminiClient(geminiApiKey, model);
@@ -139,12 +153,12 @@ function formatStatus(
   return lines.join('\n');
 }
 
-function getWorkflowRunId(): number {
-  const runId = context.payload?.workflow_run?.id;
-  if (!runId) {
+function getHeadSha(): string {
+  const headSha = context.payload?.workflow_run?.head_sha;
+  if (!headSha) {
     throw new Error(
-      'Could not determine workflow run ID. This action must be triggered by a workflow_run event.'
+      'Could not determine head SHA. This action must be triggered by a workflow_run event.'
     );
   }
-  return runId as number;
+  return headSha as string;
 }

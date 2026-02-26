@@ -1,6 +1,10 @@
-import type { FailedJob } from './schema';
+import type { ExternalFailure, FailedJob } from './schema';
 
-export function buildPrompt(diff: string, failedJobs: FailedJob[]): string {
+export function buildPrompt(
+  diff: string,
+  failedJobs: FailedJob[],
+  externalFailures: ExternalFailure[]
+): string {
   const jobLogsSection = failedJobs
     .map(
       job =>
@@ -8,13 +12,32 @@ export function buildPrompt(diff: string, failedJobs: FailedJob[]): string {
     )
     .join('\n\n');
 
+  const externalSection =
+    externalFailures.length > 0
+      ? `## External CI Failures
+
+The following external CI systems also reported failures. Full logs are not available via GitHub API, but the status information and log URLs are provided below.
+
+${externalFailures
+  .map(
+    f =>
+      `### ${f.source === 'status' ? 'Commit Status' : 'Check Run'}: "${f.name}"
+- **Description:** ${f.description || 'No description provided'}
+- **Logs:** ${f.url || 'No URL available'}`
+  )
+  .join('\n\n')}
+
+`
+      : '';
+
   return `You are an expert CI/CD failure analyst and code reviewer. Your task is to analyze CI workflow failures in the context of a pull request's code changes, and produce actionable review comments.
 
 ## Your Role
 
 You are reviewing a pull request that has caused CI failures. You will be given:
 1. The pull request diff (code changes)
-2. Logs from failed CI jobs
+2. Logs from failed CI jobs (GitHub Actions)
+3. Optionally, information about external CI failures (Jenkins, Packit, etc.) where full logs may not be available
 
 Your goal is to identify which specific code changes in the PR likely caused the CI failures and suggest fixes.
 
@@ -45,7 +68,8 @@ You MUST respond with a JSON object matching this exact structure:
    \`\`\`
 4. **Do not be verbose.** Keep comments focused and actionable. Avoid generic advice.
 5. **If the failure is not caused by code changes** (e.g., infrastructure flake, timeout, network issue), set "comments" to an empty array and explain in the "summary".
-6. **Confidence level:**
+6. **For external CI failures without logs**, mention them in the summary and include the log URL if available. Only add inline comments if the failure cause can be inferred from the diff alone.
+7. **Confidence level:**
    - "high": Clear causal link between code change and failure
    - "medium": Likely causal link but some ambiguity
    - "low": Failure may not be related to code changes
@@ -58,9 +82,9 @@ ${diff}
 
 ## Failed CI Job Logs
 
-${jobLogsSection}
+${failedJobs.length > 0 ? jobLogsSection : '_No GitHub Actions job logs available._'}
 
-## Analysis
+${externalSection}## Analysis
 
-Analyze the CI logs above in the context of the code diff. Identify which specific code changes caused the failures and respond with the JSON format specified above.`;
+Analyze the CI failures above in the context of the code diff. Identify which specific code changes caused the failures and respond with the JSON format specified above.`;
 }

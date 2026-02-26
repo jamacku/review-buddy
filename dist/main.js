@@ -85315,33 +85315,46 @@ var GeminiClient = class {
 };
 
 // src/github.ts
-async function getFailedJobs(octokit2, owner, repo, runId) {
-  const response = await octokit2.request(
-    "GET /repos/{owner}/{repo}/actions/runs/{run_id}/jobs",
-    { owner, repo, run_id: runId, filter: "latest", per_page: 100 }
+async function getFailedJobs(octokit2, owner, repo, headSha) {
+  const runsResponse = await octokit2.request(
+    "GET /repos/{owner}/{repo}/actions/runs",
+    { owner, repo, head_sha: headSha, status: "failure", per_page: 100 }
   );
-  const failedJobs = response.data.jobs.filter(
-    (job) => job.conclusion === "failure"
-  );
-  if (failedJobs.length === 0) {
-    info("No failed jobs found in the workflow run");
+  const failedRuns = runsResponse.data.workflow_runs;
+  if (failedRuns.length === 0) {
+    info("No failed workflow runs found for this commit");
     return [];
   }
+  info(
+    `Found ${failedRuns.length} failed workflow run(s): ${failedRuns.map((r2) => r2.name).join(", ")}`
+  );
   const results = [];
-  for (const job of failedJobs) {
-    try {
-      const logs = await getJobLogs(octokit2, owner, repo, job.id);
-      results.push({
-        id: job.id,
-        name: job.name,
-        conclusion: job.conclusion ?? "failure",
-        logs: truncateLogs(logs)
-      });
-    } catch (error49) {
-      warning(
-        `Failed to fetch logs for job "${job.name}" (${job.id}): ${error49}`
-      );
+  for (const run of failedRuns) {
+    const jobsResponse = await octokit2.request(
+      "GET /repos/{owner}/{repo}/actions/runs/{run_id}/jobs",
+      { owner, repo, run_id: run.id, filter: "latest", per_page: 100 }
+    );
+    const failedJobs = jobsResponse.data.jobs.filter(
+      (job) => job.conclusion === "failure"
+    );
+    for (const job of failedJobs) {
+      try {
+        const logs = await getJobLogs(octokit2, owner, repo, job.id);
+        results.push({
+          id: job.id,
+          name: `${run.name} / ${job.name}`,
+          conclusion: job.conclusion ?? "failure",
+          logs: truncateLogs(logs)
+        });
+      } catch (error49) {
+        warning(
+          `Failed to fetch logs for job "${job.name}" (${job.id}): ${error49}`
+        );
+      }
     }
+  }
+  if (results.length === 0) {
+    info("No failed jobs found across workflow runs");
   }
   return results;
 }
@@ -85356,6 +85369,38 @@ function truncateLogs(logs, maxChars = 3e4) {
   if (logs.length <= maxChars) return logs;
   return `... [truncated, showing last ${maxChars} chars] ...
 ` + logs.slice(-maxChars);
+}
+async function getFailedCheckRuns(octokit2, owner, repo, headSha) {
+  const response = await octokit2.request(
+    "GET /repos/{owner}/{repo}/commits/{ref}/check-runs",
+    { owner, repo, ref: headSha, status: "completed", per_page: 100 }
+  );
+  return response.data.check_runs.filter(
+    (run) => run.conclusion === "failure" && run.app.slug !== "github-actions"
+  ).map(
+    (run) => ({
+      name: run.name,
+      description: run.output?.summary || `Check run from ${run.app.slug}`,
+      url: run.details_url || "",
+      source: "check-run"
+    })
+  );
+}
+async function getFailedCommitStatuses(octokit2, owner, repo, headSha) {
+  const response = await octokit2.request(
+    "GET /repos/{owner}/{repo}/commits/{ref}/status",
+    { owner, repo, ref: headSha }
+  );
+  return response.data.statuses.filter(
+    (status) => status.state === "failure" || status.state === "error"
+  ).map(
+    (status) => ({
+      name: status.context,
+      description: status.description || "",
+      url: status.target_url || "",
+      source: "status"
+    })
+  );
 }
 async function getPullRequestDiff(octokit2, owner, repo, pullNumber) {
   const response = await octokit2.request(
@@ -85397,20 +85442,32 @@ async function createPullRequestReview(octokit2, owner, repo, pullNumber, commit
 }
 
 // src/prompt.ts
-function buildPrompt(diff, failedJobs) {
+function buildPrompt(diff, failedJobs, externalFailures) {
   const jobLogsSection = failedJobs.map(
     (job) => `### Failed Job: "${job.name}" (ID: ${job.id})
 \`\`\`
 ${job.logs}
 \`\`\``
   ).join("\n\n");
+  const externalSection = externalFailures.length > 0 ? `## External CI Failures
+
+The following external CI systems also reported failures. Full logs are not available via GitHub API, but the status information and log URLs are provided below.
+
+${externalFailures.map(
+    (f3) => `### ${f3.source === "status" ? "Commit Status" : "Check Run"}: "${f3.name}"
+- **Description:** ${f3.description || "No description provided"}
+- **Logs:** ${f3.url || "No URL available"}`
+  ).join("\n\n")}
+
+` : "";
   return `You are an expert CI/CD failure analyst and code reviewer. Your task is to analyze CI workflow failures in the context of a pull request's code changes, and produce actionable review comments.
 
 ## Your Role
 
 You are reviewing a pull request that has caused CI failures. You will be given:
 1. The pull request diff (code changes)
-2. Logs from failed CI jobs
+2. Logs from failed CI jobs (GitHub Actions)
+3. Optionally, information about external CI failures (Jenkins, Packit, etc.) where full logs may not be available
 
 Your goal is to identify which specific code changes in the PR likely caused the CI failures and suggest fixes.
 
@@ -85441,7 +85498,8 @@ You MUST respond with a JSON object matching this exact structure:
    \`\`\`
 4. **Do not be verbose.** Keep comments focused and actionable. Avoid generic advice.
 5. **If the failure is not caused by code changes** (e.g., infrastructure flake, timeout, network issue), set "comments" to an empty array and explain in the "summary".
-6. **Confidence level:**
+6. **For external CI failures without logs**, mention them in the summary and include the log URL if available. Only add inline comments if the failure cause can be inferred from the diff alone.
+7. **Confidence level:**
    - "high": Clear causal link between code change and failure
    - "medium": Likely causal link but some ambiguity
    - "low": Failure may not be related to code changes
@@ -85454,31 +85512,42 @@ ${diff}
 
 ## Failed CI Job Logs
 
-${jobLogsSection}
+${failedJobs.length > 0 ? jobLogsSection : "_No GitHub Actions job logs available._"}
 
-## Analysis
+${externalSection}## Analysis
 
-Analyze the CI logs above in the context of the code diff. Identify which specific code changes caused the failures and respond with the JSON format specified above.`;
+Analyze the CI failures above in the context of the code diff. Identify which specific code changes caused the failures and respond with the JSON format specified above.`;
 }
 
 // src/action.ts
 async function action(octokit2, config4) {
   const { prMetadata, owner, repo, geminiApiKey, model, reviewEvent } = config4;
   const { number: pullNumber, ref: commitId } = prMetadata;
-  info(`Analyzing PR #${pullNumber} (commit: ${commitId.slice(0, 7)})`);
-  const runId = getWorkflowRunId();
+  const headSha = getHeadSha();
+  info(`Analyzing PR #${pullNumber} (commit: ${headSha.slice(0, 7)})`);
   info("Fetching failed CI job logs...");
-  const failedJobs = await getFailedJobs(octokit2, owner, repo, runId);
-  if (failedJobs.length === 0) {
+  const [failedJobs, failedCheckRuns, failedStatuses] = await Promise.all([
+    getFailedJobs(octokit2, owner, repo, headSha),
+    getFailedCheckRuns(octokit2, owner, repo, headSha),
+    getFailedCommitStatuses(octokit2, owner, repo, headSha)
+  ]);
+  const externalFailures = [...failedCheckRuns, ...failedStatuses];
+  const totalFailures = failedJobs.length + externalFailures.length;
+  if (totalFailures === 0) {
     info("No failed jobs found. Nothing to review.");
     return formatStatus(null);
   }
   info(`Found ${failedJobs.length} failed job(s)`);
+  if (externalFailures.length > 0) {
+    info(
+      `Found ${externalFailures.length} external CI failure(s): ${externalFailures.map((f3) => f3.name).join(", ")}`
+    );
+  }
   info("Fetching PR diff...");
   const rawDiff = await getPullRequestDiff(octokit2, owner, repo, pullNumber);
   const diff = truncateDiff(rawDiff);
   info(`PR diff: ${rawDiff.length} chars (${diff.length} after truncation)`);
-  const prompt = buildPrompt(diff, failedJobs);
+  const prompt = buildPrompt(diff, failedJobs, externalFailures);
   info(`Prompt size: ${prompt.length} chars`);
   const gemini = new GeminiClient(geminiApiKey, model);
   let analysis;
@@ -85563,14 +85632,14 @@ function formatStatus(analysis, error49, reviewId) {
   lines.push(analysis.summary);
   return lines.join("\n");
 }
-function getWorkflowRunId() {
-  const runId = context2.payload?.workflow_run?.id;
-  if (!runId) {
+function getHeadSha() {
+  const headSha = context2.payload?.workflow_run?.head_sha;
+  if (!headSha) {
     throw new Error(
-      "Could not determine workflow run ID. This action must be triggered by a workflow_run event."
+      "Could not determine head SHA. This action must be triggered by a workflow_run event."
     );
   }
-  return runId;
+  return headSha;
 }
 
 // node_modules/@octokit/plugin-throttling/dist-bundle/index.js

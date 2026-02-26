@@ -5,7 +5,9 @@ import type { CustomOctokit } from '../src/octokit';
 import type { ActionConfig } from '../src/schema';
 
 vi.mock('../src/github', () => ({
-  getFailedJobs: vi.fn(),
+  getFailedJobs: vi.fn().mockResolvedValue([]),
+  getFailedCheckRuns: vi.fn().mockResolvedValue([]),
+  getFailedCommitStatuses: vi.fn().mockResolvedValue([]),
   getPullRequestDiff: vi.fn(),
   truncateDiff: vi.fn((diff: string) => diff),
   createPullRequestReview: vi.fn(),
@@ -31,7 +33,9 @@ vi.mock('@actions/github', async importOriginal => {
     context: {
       ...original.context,
       repo: { owner: 'test-owner', repo: 'test-repo' },
-      payload: {},
+      payload: {
+        workflow_run: {},
+      },
     },
   };
 });
@@ -56,9 +60,9 @@ describe('action - missing workflow_run context', () => {
     repo: 'repo',
   };
 
-  test('throws when workflow_run payload is missing', async () => {
+  test('throws when head_sha is missing from workflow_run payload', async () => {
     await expect(action({} as CustomOctokit, mockConfig)).rejects.toThrow(
-      'Could not determine workflow run ID'
+      'Could not determine head SHA'
     );
   });
 });
