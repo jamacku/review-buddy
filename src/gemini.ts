@@ -37,15 +37,23 @@ export class GeminiClient {
     try {
       raw = JSON.parse(text);
     } catch {
-      const jsonMatch = text.match(/```(?:json)?\s*([\s\S]*?)```/);
-      if (jsonMatch?.[1]) {
-        raw = JSON.parse(jsonMatch[1].trim());
-      } else {
-        throw new Error(
-          `Failed to parse Gemini response as JSON: ${text.slice(0, 500)}`
-        );
+      // Gemini sometimes produces invalid JSON escape sequences (e.g. \`)
+      // Try to fix them before falling back to code block extraction
+      try {
+        raw = JSON.parse(sanitizeJsonEscapes(text));
+      } catch {
+        const jsonMatch = text.match(/```(?:json)?\s*([\s\S]*?)```/);
+        if (jsonMatch?.[1]) {
+          raw = JSON.parse(sanitizeJsonEscapes(jsonMatch[1].trim()));
+        } else {
+          throw new Error(
+            `Failed to parse Gemini response as JSON: ${text.slice(0, 500)}`
+          );
+        }
       }
     }
+
+    info(`Parsed Gemini response successfully`);
 
     const result = geminiReviewResponseSchema.safeParse(raw);
     if (!result.success) {
@@ -56,4 +64,13 @@ export class GeminiClient {
 
     return result.data;
   }
+}
+
+/**
+ * Fix invalid JSON escape sequences that Gemini sometimes produces.
+ * JSON only allows: \" \\ \/ \b \f \n \r \t \uXXXX
+ * Gemini may output e.g. \` which is invalid — remove the backslash.
+ */
+function sanitizeJsonEscapes(text: string): string {
+  return text.replace(/\\([^"\\/bfnrtu])/g, '$1');
 }

@@ -85297,15 +85297,20 @@ var GeminiClient = class {
     try {
       raw = JSON.parse(text);
     } catch {
-      const jsonMatch = text.match(/```(?:json)?\s*([\s\S]*?)```/);
-      if (jsonMatch?.[1]) {
-        raw = JSON.parse(jsonMatch[1].trim());
-      } else {
-        throw new Error(
-          `Failed to parse Gemini response as JSON: ${text.slice(0, 500)}`
-        );
+      try {
+        raw = JSON.parse(sanitizeJsonEscapes(text));
+      } catch {
+        const jsonMatch = text.match(/```(?:json)?\s*([\s\S]*?)```/);
+        if (jsonMatch?.[1]) {
+          raw = JSON.parse(sanitizeJsonEscapes(jsonMatch[1].trim()));
+        } else {
+          throw new Error(
+            `Failed to parse Gemini response as JSON: ${text.slice(0, 500)}`
+          );
+        }
       }
     }
+    info(`Parsed Gemini response successfully`);
     const result = geminiReviewResponseSchema.safeParse(raw);
     if (!result.success) {
       throw new Error(
@@ -85315,6 +85320,9 @@ var GeminiClient = class {
     return result.data;
   }
 };
+function sanitizeJsonEscapes(text) {
+  return text.replace(/\\([^"\\/bfnrtu])/g, "$1");
+}
 
 // src/github.ts
 async function getFailedJobs(octokit2, owner, repo, headSha) {

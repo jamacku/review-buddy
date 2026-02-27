@@ -99,6 +99,25 @@ describe('GeminiClient', () => {
     );
   });
 
+  test('handles invalid JSON escape sequences from Gemini', async () => {
+    // Gemini sometimes outputs \` which is not a valid JSON escape
+    const responseWithBadEscapes = `{
+  "summary": "The \`bpftool\` command failed with \\"/usr/sbin/bpftool\\"",
+  "comments": [],
+  "confidence": "high"
+}`;
+
+    mockGenerateContent.mockResolvedValue({
+      text: responseWithBadEscapes,
+    });
+
+    const client = new GeminiClient('key', 'gemini-2.5-flash');
+    const result = await client.analyzeFailure('prompt');
+
+    expect(result.summary).toContain('bpftool');
+    expect(result.confidence).toBe('high');
+  });
+
   test('throws on unparseable non-JSON response', async () => {
     mockGenerateContent.mockResolvedValue({
       text: 'This is not JSON at all, just plain text.',
