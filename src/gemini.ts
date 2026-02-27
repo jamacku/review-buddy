@@ -37,8 +37,6 @@ export class GeminiClient {
     try {
       raw = JSON.parse(text);
     } catch {
-      // Gemini sometimes produces invalid JSON escape sequences (e.g. \`)
-      // Try to fix them before falling back to code block extraction
       try {
         raw = JSON.parse(sanitizeJsonEscapes(text));
       } catch {
@@ -53,7 +51,7 @@ export class GeminiClient {
       }
     }
 
-    info(`Parsed Gemini response successfully`);
+    info('Parsed Gemini response successfully');
 
     const result = geminiReviewResponseSchema.safeParse(raw);
     if (!result.success) {

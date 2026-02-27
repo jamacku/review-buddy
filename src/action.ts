@@ -1,46 +1,31 @@
-import { createHash } from 'node:crypto';
-
 import { info, warning } from '@actions/core';
 import { context } from '@actions/github';
 
-import type { CustomOctokit } from './octokit';
 import { GeminiClient } from './gemini';
-import {
-  FINGERPRINT_MARKER,
-  getFailedJobs,
-  getFailedCheckRuns,
-  getFailedCommitStatuses,
-  findExistingReviewFingerprint,
-  getPullRequestDiff,
-  getPullRequestHeadSha,
-  truncateDiff,
-  createPullRequestReview,
-} from './github';
+import type { CustomOctokit } from './octokit';
 import { buildPrompt } from './prompt';
-import type {
-  ActionConfig,
-  ExternalFailure,
-  FailedJob,
-  GeminiReviewResponse,
-  ReviewComment,
-} from './schema';
+import { PullRequest } from './pull-request';
+import { Review } from './review';
+import type { ActionConfig, ReviewComment } from './schema';
+import { truncateDiff } from './util';
 
 export default async function action(
   octokit: CustomOctokit,
   config: ActionConfig
 ): Promise<string> {
   const { prMetadata, owner, repo, geminiApiKey, model, reviewEvent } = config;
-  const { number: pullNumber } = prMetadata;
 
-  const headSha = await resolveHeadSha(octokit, owner, repo, pullNumber);
+  const pr = new PullRequest(octokit, owner, repo, prMetadata.number);
+  const headSha = await resolveHeadSha(pr);
 
-  info(`Analyzing PR #${pullNumber} (commit: ${headSha.slice(0, 7)})`);
+  info(`Analyzing PR #${pr.number} (commit: ${headSha.slice(0, 7)})`);
 
+  // Collect all CI failures
   info('Fetching failed CI job logs...');
   const [failedJobs, failedCheckRuns, failedStatuses] = await Promise.all([
-    getFailedJobs(octokit, owner, repo, headSha),
-    getFailedCheckRuns(octokit, owner, repo, headSha),
-    getFailedCommitStatuses(octokit, owner, repo, headSha),
+    pr.getFailedJobs(headSha),
+    pr.getFailedCheckRuns(headSha),
+    pr.getFailedCommitStatuses(headSha),
   ]);
 
   const externalFailures = [...failedCheckRuns, ...failedStatuses];
@@ -48,7 +33,7 @@ export default async function action(
 
   if (totalFailures === 0) {
     info('No failed jobs found. Nothing to review.');
-    return formatStatus(null);
+    return Review.formatStatus();
   }
 
   info(`Found ${failedJobs.length} failed job(s)`);
@@ -58,54 +43,53 @@ export default async function action(
     );
   }
 
-  const fingerprint = computeFailureFingerprint(
+  // Deduplication check
+  const fingerprint = Review.computeFingerprint(
     headSha,
     failedJobs,
     externalFailures
   );
   info(`Failure fingerprint: ${fingerprint}`);
 
-  const existingFingerprint = await findExistingReviewFingerprint(
+  const existingFingerprint = await Review.findExistingFingerprint(
     octokit,
     owner,
     repo,
-    pullNumber
+    pr.number
   );
 
   if (existingFingerprint === fingerprint) {
     info(
       `Review already posted for this failure state (fingerprint: ${fingerprint}). Skipping.`
     );
-    return JSON.stringify(
-      '### Review Buddy\\n\\n:white_check_mark: CI failures already reviewed - see existing review comments'
-    );
+    return Review.formatSkippedStatus();
   }
 
+  // Fetch diff and build prompt
   info('Fetching PR diff...');
-  const rawDiff = await getPullRequestDiff(octokit, owner, repo, pullNumber);
+  const rawDiff = await pr.getDiff();
   const diff = truncateDiff(rawDiff);
   info(`PR diff: ${rawDiff.length} chars (${diff.length} after truncation)`);
 
   const prompt = buildPrompt(diff, failedJobs, externalFailures);
   info(`Prompt size: ${prompt.length} chars`);
 
+  // Analyze with Gemini
   const gemini = new GeminiClient(geminiApiKey, model);
-  let analysis: GeminiReviewResponse;
 
+  let analysis;
   try {
     analysis = await gemini.analyzeFailure(prompt);
   } catch (error) {
     warning(`Gemini analysis failed: ${error}`);
-    return JSON.stringify(
-      '### Review Buddy\\n\\n:warning: AI analysis of CI failures could not be completed'
-    );
+    return Review.formatErrorStatus();
   }
 
   info(
     `Gemini analysis: ${analysis.comments.length} comments, confidence: ${analysis.confidence}`
   );
 
-  // Map Gemini comments to ReviewComments (add side: RIGHT)
+  // Post review
   const reviewComments: ReviewComment[] = analysis.comments.map(c => ({
     path: c.path,
     line: c.line,
@@ -113,15 +97,15 @@ export default async function action(
     body: c.body,
   }));
 
-  const reviewBody = formatReviewBody(analysis, fingerprint);
+  const reviewBody = Review.formatBody(analysis, fingerprint);
 
   if (reviewComments.length > 0) {
     try {
-      const reviewId = await createPullRequestReview(
+      const reviewId = await Review.post(
         octokit,
         owner,
         repo,
-        pullNumber,
+        pr.number,
         headSha,
         reviewBody,
         reviewComments,
@@ -130,110 +114,23 @@ export default async function action(
       info(
         `Posted review #${reviewId} with ${reviewComments.length} inline comments`
       );
-      return formatStatus(analysis, reviewId);
+      return Review.formatStatus(analysis, reviewId);
     } catch (error) {
       warning(`Failed to create review with inline comments: ${error}`);
-      return formatStatus(analysis);
+      return Review.formatStatus(analysis);
     }
   }
 
-  return formatStatus(analysis);
+  return Review.formatStatus(analysis);
 }
 
-function formatReviewBody(
-  analysis: GeminiReviewResponse,
-  fingerprint: string
-): string {
-  const badge = confidenceBadge(analysis.confidence);
-  return [
-    `## Review Buddy - CI Failure Analysis`,
-    `<!-- ${FINGERPRINT_MARKER}:${fingerprint} -->`,
-    '',
-    AI_DISCLAIMER,
-    '',
-    `${badge} **Confidence:** ${analysis.confidence}`,
-    '',
-    analysis.summary,
-  ].join('\n');
-}
-
-function confidenceBadge(confidence: string): string {
-  switch (confidence) {
-    case 'high':
-      return ':green_circle:';
-    case 'medium':
-      return ':yellow_circle:';
-    default:
-      return ':orange_circle:';
-  }
-}
-
-const AI_DISCLAIMER =
-  '> [!IMPORTANT]\\n> This analysis was generated by AI and may not be fully accurate. Please review the suggestions critically before applying any changes.';
-
-function formatStatus(
-  analysis: GeminiReviewResponse | null,
-  reviewId?: number
-): string {
-  if (!analysis) {
-    return JSON.stringify(
-      '### Review Buddy\\n\\n:green_circle: No CI failures detected'
-    );
-  }
-
-  const badge = confidenceBadge(analysis.confidence);
-  const lines: string[] = ['### Review Buddy', '', AI_DISCLAIMER, ''];
-
-  if (reviewId !== undefined) {
-    lines.push(
-      `${badge} ${analysis.comments.length} CI failure comment(s) posted (confidence: ${analysis.confidence})`
-    );
-  } else if (analysis.comments.length > 0) {
-    lines.push(
-      `${badge} ${analysis.comments.length} CI failure(s) analyzed but review could not be posted (confidence: ${analysis.confidence})`
-    );
-  } else {
-    lines.push(
-      `${badge} CI failures analyzed - no code changes identified as the cause (confidence: ${analysis.confidence})`
-    );
-  }
-
-  lines.push('');
-  lines.push(analysis.summary);
-
-  return JSON.stringify(lines.join('\\n'));
-}
-
-async function resolveHeadSha(
-  octokit: CustomOctokit,
-  owner: string,
-  repo: string,
-  pullNumber: number
-): Promise<string> {
-  // Try workflow_run payload first (available for workflow_run triggers)
+async function resolveHeadSha(pr: PullRequest): Promise<string> {
   const payloadSha = context.payload?.workflow_run?.head_sha;
   if (payloadSha) {
     info(`Head SHA from workflow_run payload: ${payloadSha}`);
     return payloadSha as string;
   }
 
-  // Fallback: fetch head SHA from PR API (works for schedule, workflow_dispatch, etc.)
   info('No workflow_run payload, fetching head SHA from PR API...');
-  return getPullRequestHeadSha(octokit, owner, repo, pullNumber);
-}
-
-export function computeFailureFingerprint(
-  headSha: string,
-  failedJobs: FailedJob[],
-  externalFailures: ExternalFailure[]
-): string {
-  const parts = [
-    headSha,
-    ...failedJobs.map(j => j.name).sort(),
-    ...externalFailures.map(f => `${f.source}:${f.name}`).sort(),
-  ];
-  return createHash('sha256')
-    .update(parts.join('\n'))
-    .digest('hex')
-    .slice(0, 16);
+  return pr.getHeadSha();
 }

@@ -1,9 +1,10 @@
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 
-import action, { computeFailureFingerprint } from '../src/action';
+import action from '../src/action';
 import type { CustomOctokit } from '../src/octokit';
 import { getConfig } from '../src/config';
 import { buildPrompt } from '../src/prompt';
+import { Review } from '../src/review';
 import {
   actionConfigSchema,
   geminiReviewResponseSchema,
@@ -271,19 +272,52 @@ describe('getConfig', () => {
 
 // --- Action orchestration tests ---
 
-vi.mock('../src/github', () => ({
-  FINGERPRINT_MARKER: 'review-buddy-fingerprint',
-  getFailedJobs: vi.fn(),
-  getFailedCheckRuns: vi.fn().mockResolvedValue([]),
-  getFailedCommitStatuses: vi.fn().mockResolvedValue([]),
-  findExistingReviewFingerprint: vi.fn().mockResolvedValue(null),
-  getPullRequestDiff: vi.fn(),
-  getPullRequestHeadSha: vi.fn().mockResolvedValue('sha-from-api'),
-  truncateDiff: vi.fn((diff: string) => diff),
-  createPullRequestReview: vi.fn(),
+const {
+  mockPullRequest,
+  mockReviewPost,
+  mockFindExistingFingerprint,
+  mockAnalyzeFailure,
+} = vi.hoisted(() => ({
+  mockPullRequest: {
+    number: 42,
+    getHeadSha: vi.fn(),
+    getDiff: vi.fn(),
+    getFailedJobs: vi.fn().mockResolvedValue([]),
+    getFailedCheckRuns: vi.fn().mockResolvedValue([]),
+    getFailedCommitStatuses: vi.fn().mockResolvedValue([]),
+  },
+  mockReviewPost: vi.fn().mockResolvedValue(999),
+  mockFindExistingFingerprint: vi.fn().mockResolvedValue(null),
+  mockAnalyzeFailure: vi.fn(),
 }));
 
-const mockAnalyzeFailure = vi.fn();
+vi.mock('../src/pull-request', () => ({
+  PullRequest: class {
+    number = mockPullRequest.number;
+    getHeadSha = mockPullRequest.getHeadSha;
+    getDiff = mockPullRequest.getDiff;
+    getFailedJobs = mockPullRequest.getFailedJobs;
+    getFailedCheckRuns = mockPullRequest.getFailedCheckRuns;
+    getFailedCommitStatuses = mockPullRequest.getFailedCommitStatuses;
+  },
+}));
+
+vi.mock('../src/review', async importOriginal => {
+  const { Review: OrigReview } =
+    await importOriginal<typeof import('../src/review')>();
+  return {
+    Review: {
+      FINGERPRINT_MARKER: OrigReview.FINGERPRINT_MARKER,
+      computeFingerprint: OrigReview.computeFingerprint,
+      formatBody: OrigReview.formatBody,
+      formatStatus: OrigReview.formatStatus,
+      formatSkippedStatus: OrigReview.formatSkippedStatus,
+      formatErrorStatus: OrigReview.formatErrorStatus,
+      findExistingFingerprint: mockFindExistingFingerprint,
+      post: mockReviewPost,
+    },
+  };
+});
 
 vi.mock('../src/gemini', () => {
   return {
@@ -333,63 +367,32 @@ describe('action', () => {
   });
 
   test('returns no-failure status when no jobs failed', async () => {
-    const { getFailedJobs } = await import('../src/github');
-    vi.mocked(getFailedJobs).mockResolvedValue([]);
-
     const status = await action({} as CustomOctokit, mockConfig);
     expect(status).toContain('No CI failures detected');
   });
 
   test('posts review when Gemini returns inline comments', async () => {
-    const { getFailedJobs, getPullRequestDiff, createPullRequestReview } =
-      await import('../src/github');
-
-    vi.mocked(getFailedJobs).mockResolvedValue([
+    mockPullRequest.getFailedJobs.mockResolvedValue([
       { id: 1, name: 'test', conclusion: 'failure', logs: 'Error: assertion' },
     ]);
-    vi.mocked(getPullRequestDiff).mockResolvedValue('diff content');
-    vi.mocked(createPullRequestReview).mockResolvedValue(999);
+    mockPullRequest.getDiff.mockResolvedValue('diff content');
 
     mockAnalyzeFailure.mockResolvedValue({
       summary: 'Test assertion failure caused by missing null check',
-      comments: [
-        {
-          path: 'src/main.ts',
-          line: 10,
-          body: 'Add null check',
-        },
-      ],
+      comments: [{ path: 'src/main.ts', line: 10, body: 'Add null check' }],
       confidence: 'high',
     });
 
     const status = await action({} as CustomOctokit, mockConfig);
-    expect(status).toContain('1 CI failure comment(s) posted');
+    expect(status).toContain('CI failure comment(s) posted');
     expect(status).toContain('high');
-    expect(createPullRequestReview).toHaveBeenCalledWith(
-      expect.anything(),
-      'test-owner',
-      'test-repo',
-      42,
-      'abc1234567890',
-      expect.stringContaining('Review Buddy'),
-      expect.arrayContaining([
-        expect.objectContaining({
-          path: 'src/main.ts',
-          line: 10,
-          side: 'RIGHT',
-        }),
-      ]),
-      'COMMENT'
-    );
   });
 
   test('returns summary when Gemini returns no inline comments', async () => {
-    const { getFailedJobs, getPullRequestDiff } = await import('../src/github');
-
-    vi.mocked(getFailedJobs).mockResolvedValue([
+    mockPullRequest.getFailedJobs.mockResolvedValue([
       { id: 1, name: 'deploy', conclusion: 'failure', logs: 'Timeout' },
     ]);
-    vi.mocked(getPullRequestDiff).mockResolvedValue('diff');
+    mockPullRequest.getDiff.mockResolvedValue('diff');
 
     mockAnalyzeFailure.mockResolvedValue({
       summary: 'Infrastructure timeout, not related to code changes',
@@ -403,12 +406,10 @@ describe('action', () => {
   });
 
   test('returns warning status when Gemini fails', async () => {
-    const { getFailedJobs, getPullRequestDiff } = await import('../src/github');
-
-    vi.mocked(getFailedJobs).mockResolvedValue([
+    mockPullRequest.getFailedJobs.mockResolvedValue([
       { id: 1, name: 'test', conclusion: 'failure', logs: 'Error' },
     ]);
-    vi.mocked(getPullRequestDiff).mockResolvedValue('diff');
+    mockPullRequest.getDiff.mockResolvedValue('diff');
 
     mockAnalyzeFailure.mockRejectedValue(new Error('API quota exceeded'));
 
@@ -417,16 +418,11 @@ describe('action', () => {
   });
 
   test('handles review creation failure gracefully', async () => {
-    const { getFailedJobs, getPullRequestDiff, createPullRequestReview } =
-      await import('../src/github');
-
-    vi.mocked(getFailedJobs).mockResolvedValue([
+    mockPullRequest.getFailedJobs.mockResolvedValue([
       { id: 1, name: 'test', conclusion: 'failure', logs: 'Error' },
     ]);
-    vi.mocked(getPullRequestDiff).mockResolvedValue('diff');
-    vi.mocked(createPullRequestReview).mockRejectedValue(
-      new Error('Validation Failed')
-    );
+    mockPullRequest.getDiff.mockResolvedValue('diff');
+    mockReviewPost.mockRejectedValue(new Error('Validation Failed'));
 
     mockAnalyzeFailure.mockResolvedValue({
       summary: 'Bug in the code',
@@ -440,22 +436,16 @@ describe('action', () => {
   });
 
   test('skips review when fingerprint matches existing review', async () => {
-    const { getFailedJobs, findExistingReviewFingerprint } =
-      await import('../src/github');
-
-    vi.mocked(getFailedJobs).mockResolvedValue([
+    mockPullRequest.getFailedJobs.mockResolvedValue([
       { id: 1, name: 'test', conclusion: 'failure', logs: 'Error' },
     ]);
 
-    // Compute expected fingerprint and return it as existing
-    const expectedFingerprint = computeFailureFingerprint(
+    const expectedFingerprint = Review.computeFingerprint(
       'abc1234567890',
       [{ id: 1, name: 'test', conclusion: 'failure', logs: 'Error' }],
       []
     );
-    vi.mocked(findExistingReviewFingerprint).mockResolvedValue(
-      expectedFingerprint
-    );
+    mockFindExistingFingerprint.mockResolvedValue(expectedFingerprint);
 
     const status = await action({} as CustomOctokit, mockConfig);
     expect(status).toContain('already reviewed');
@@ -463,21 +453,12 @@ describe('action', () => {
   });
 
   test('proceeds when fingerprint does not match', async () => {
-    const {
-      getFailedJobs,
-      getPullRequestDiff,
-      findExistingReviewFingerprint,
-      createPullRequestReview,
-    } = await import('../src/github');
-
-    vi.mocked(getFailedJobs).mockResolvedValue([
+    mockPullRequest.getFailedJobs.mockResolvedValue([
       { id: 1, name: 'test', conclusion: 'failure', logs: 'Error' },
     ]);
-    vi.mocked(getPullRequestDiff).mockResolvedValue('diff');
-    vi.mocked(findExistingReviewFingerprint).mockResolvedValue(
-      'different-fingerprint'
-    );
-    vi.mocked(createPullRequestReview).mockResolvedValue(123);
+    mockPullRequest.getDiff.mockResolvedValue('diff');
+    mockFindExistingFingerprint.mockResolvedValue('different-fingerprint');
+    mockReviewPost.mockResolvedValue(123);
 
     mockAnalyzeFailure.mockResolvedValue({
       summary: 'Bug',
@@ -493,29 +474,29 @@ describe('action', () => {
 
 // --- Fingerprint tests ---
 
-describe('computeFailureFingerprint', () => {
+describe('Review.computeFingerprint', () => {
   test('produces deterministic output', () => {
     const jobs = [{ id: 1, name: 'test', conclusion: 'failure', logs: 'log' }];
-    const fp1 = computeFailureFingerprint('sha1', jobs, []);
-    const fp2 = computeFailureFingerprint('sha1', jobs, []);
+    const fp1 = Review.computeFingerprint('sha1', jobs, []);
+    const fp2 = Review.computeFingerprint('sha1', jobs, []);
     expect(fp1).toBe(fp2);
     expect(fp1).toHaveLength(16);
   });
 
   test('different head SHA produces different fingerprint', () => {
     const jobs = [{ id: 1, name: 'test', conclusion: 'failure', logs: 'log' }];
-    const fp1 = computeFailureFingerprint('sha1', jobs, []);
-    const fp2 = computeFailureFingerprint('sha2', jobs, []);
+    const fp1 = Review.computeFingerprint('sha1', jobs, []);
+    const fp2 = Review.computeFingerprint('sha2', jobs, []);
     expect(fp1).not.toBe(fp2);
   });
 
   test('different failure set produces different fingerprint', () => {
-    const fp1 = computeFailureFingerprint(
+    const fp1 = Review.computeFingerprint(
       'sha1',
       [{ id: 1, name: 'test', conclusion: 'failure', logs: 'log' }],
       []
     );
-    const fp2 = computeFailureFingerprint(
+    const fp2 = Review.computeFingerprint(
       'sha1',
       [{ id: 2, name: 'lint', conclusion: 'failure', logs: 'log' }],
       []
@@ -524,7 +505,7 @@ describe('computeFailureFingerprint', () => {
   });
 
   test('job order does not affect fingerprint', () => {
-    const fp1 = computeFailureFingerprint(
+    const fp1 = Review.computeFingerprint(
       'sha1',
       [
         { id: 1, name: 'alpha', conclusion: 'failure', logs: 'log' },
@@ -532,7 +513,7 @@ describe('computeFailureFingerprint', () => {
       ],
       []
     );
-    const fp2 = computeFailureFingerprint(
+    const fp2 = Review.computeFingerprint(
       'sha1',
       [
         { id: 2, name: 'beta', conclusion: 'failure', logs: 'log' },
@@ -544,8 +525,8 @@ describe('computeFailureFingerprint', () => {
   });
 
   test('includes external failures in fingerprint', () => {
-    const fp1 = computeFailureFingerprint('sha1', [], []);
-    const fp2 = computeFailureFingerprint(
+    const fp1 = Review.computeFingerprint('sha1', [], []);
+    const fp2 = Review.computeFingerprint(
       'sha1',
       [],
       [

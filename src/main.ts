@@ -3,9 +3,9 @@ import { setFailed, setOutput } from '@actions/core';
 import '@total-typescript/ts-reset';
 
 import action from './action';
-import { getOctokit } from './octokit';
 import { getConfig } from './config';
-import { ActionError } from './error';
+import { ReviewBuddyError } from './error';
+import { getOctokit } from './octokit';
 
 const config = getConfig();
 const octokit = getOctokit(config.token);
@@ -22,7 +22,7 @@ try {
     message = JSON.stringify(error);
   }
 
-  if (error instanceof ActionError) {
+  if (error instanceof ReviewBuddyError) {
     setOutput('status', message);
   }
 

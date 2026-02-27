@@ -50580,9 +50580,6 @@ function info(message) {
   process.stdout.write(message + os4.EOL);
 }
 
-// src/action.ts
-import { createHash } from "node:crypto";
-
 // node_modules/@actions/github/lib/context.js
 import { readFileSync, existsSync as existsSync2 } from "fs";
 import { EOL as EOL5 } from "os";
@@ -85213,7 +85210,7 @@ function date4(params) {
 // node_modules/zod/v4/classic/external.js
 config(en_default());
 
-// src/schema.ts
+// src/schema/input.ts
 var singleCommitMetadataSchema = external_exports.object({
   sha: external_exports.string(),
   url: external_exports.string().url(),
@@ -85260,6 +85257,8 @@ var actionConfigSchema = external_exports.object({
   owner: external_exports.string(),
   repo: external_exports.string()
 });
+
+// src/schema/gemini.ts
 var geminiCommentSchema = external_exports.object({
   path: external_exports.string(),
   line: external_exports.number().int().positive(),
@@ -85310,7 +85309,7 @@ var GeminiClient = class {
         }
       }
     }
-    info(`Parsed Gemini response successfully`);
+    info("Parsed Gemini response successfully");
     const result = geminiReviewResponseSchema.safeParse(raw);
     if (!result.success) {
       throw new Error(
@@ -85322,162 +85321,6 @@ var GeminiClient = class {
 };
 function sanitizeJsonEscapes(text) {
   return text.replace(/\\([^"\\/bfnrtu])/g, "$1");
-}
-
-// src/github.ts
-async function getFailedJobs(octokit2, owner, repo, headSha) {
-  const runsResponse = await octokit2.request(
-    "GET /repos/{owner}/{repo}/actions/runs",
-    { owner, repo, head_sha: headSha, status: "failure", per_page: 100 }
-  );
-  const failedRuns = runsResponse.data.workflow_runs;
-  if (failedRuns.length === 0) {
-    info("No failed workflow runs found for this commit");
-    return [];
-  }
-  info(
-    `Found ${failedRuns.length} failed workflow run(s): ${failedRuns.map((r2) => r2.name).join(", ")}`
-  );
-  const results = [];
-  for (const run of failedRuns) {
-    const jobsResponse = await octokit2.request(
-      "GET /repos/{owner}/{repo}/actions/runs/{run_id}/jobs",
-      { owner, repo, run_id: run.id, filter: "latest", per_page: 100 }
-    );
-    const failedJobs = jobsResponse.data.jobs.filter(
-      (job) => job.conclusion === "failure"
-    );
-    for (const job of failedJobs) {
-      try {
-        const logs = await getJobLogs(octokit2, owner, repo, job.id);
-        results.push({
-          id: job.id,
-          name: `${run.name} / ${job.name}`,
-          conclusion: job.conclusion ?? "failure",
-          logs: truncateLogs(logs)
-        });
-      } catch (error49) {
-        warning(
-          `Failed to fetch logs for job "${job.name}" (${job.id}): ${error49}`
-        );
-      }
-    }
-  }
-  if (results.length === 0) {
-    info("No failed jobs found across workflow runs");
-  }
-  return results;
-}
-async function getJobLogs(octokit2, owner, repo, jobId) {
-  const response = await octokit2.request(
-    "GET /repos/{owner}/{repo}/actions/jobs/{job_id}/logs",
-    { owner, repo, job_id: jobId }
-  );
-  return typeof response.data === "string" ? response.data : String(response.data);
-}
-function truncateLogs(logs, maxChars = 3e4) {
-  if (logs.length <= maxChars) return logs;
-  return `... [truncated, showing last ${maxChars} chars] ...
-` + logs.slice(-maxChars);
-}
-async function getFailedCheckRuns(octokit2, owner, repo, headSha) {
-  const response = await octokit2.request(
-    "GET /repos/{owner}/{repo}/commits/{ref}/check-runs",
-    { owner, repo, ref: headSha, status: "completed", per_page: 100 }
-  );
-  return response.data.check_runs.filter(
-    (run) => run.conclusion === "failure" && run.app.slug !== "github-actions"
-  ).map(
-    (run) => ({
-      name: run.name,
-      description: run.output?.summary || `Check run from ${run.app.slug}`,
-      url: run.details_url || "",
-      source: "check-run"
-    })
-  );
-}
-async function getFailedCommitStatuses(octokit2, owner, repo, headSha) {
-  const response = await octokit2.request(
-    "GET /repos/{owner}/{repo}/commits/{ref}/status",
-    { owner, repo, ref: headSha }
-  );
-  return response.data.statuses.filter(
-    (status) => status.state === "failure" || status.state === "error"
-  ).map(
-    (status) => ({
-      name: status.context,
-      description: status.description || "",
-      url: status.target_url || "",
-      source: "status"
-    })
-  );
-}
-async function getPullRequestHeadSha(octokit2, owner, repo, pullNumber) {
-  const response = await octokit2.request(
-    "GET /repos/{owner}/{repo}/pulls/{pull_number}",
-    { owner, repo, pull_number: pullNumber }
-  );
-  return response.data.head.sha;
-}
-async function getPullRequestDiff(octokit2, owner, repo, pullNumber) {
-  const response = await octokit2.request(
-    "GET /repos/{owner}/{repo}/pulls/{pull_number}",
-    {
-      owner,
-      repo,
-      pull_number: pullNumber,
-      headers: { accept: "application/vnd.github.v3.diff" }
-    }
-  );
-  return typeof response.data === "string" ? response.data : String(response.data);
-}
-function truncateDiff(diff, maxChars = 5e4) {
-  if (diff.length <= maxChars) return diff;
-  return diff.slice(0, maxChars) + `
-... [diff truncated, showing first ${maxChars} chars] ...`;
-}
-var FINGERPRINT_MARKER = "review-buddy-fingerprint";
-async function findExistingReviewFingerprint(octokit2, owner, repo, pullNumber) {
-  let page = 1;
-  while (true) {
-    const response = await octokit2.request(
-      "GET /repos/{owner}/{repo}/pulls/{pull_number}/reviews",
-      { owner, repo, pull_number: pullNumber, per_page: 100, page }
-    );
-    for (let i2 = response.data.length - 1; i2 >= 0; i2--) {
-      const review = response.data[i2];
-      const match = review.body?.match(
-        new RegExp(`<!-- ${FINGERPRINT_MARKER}:([a-f0-9]+) -->`)
-      );
-      if (match?.[1]) {
-        return match[1];
-      }
-    }
-    if (response.data.length < 100) break;
-    page++;
-  }
-  return null;
-}
-async function createPullRequestReview(octokit2, owner, repo, pullNumber, commitId, body, comments, event) {
-  const apiComments = comments.map((comment) => ({
-    path: comment.path,
-    line: comment.line,
-    side: comment.side,
-    body: comment.body
-  }));
-  const response = await octokit2.request(
-    "POST /repos/{owner}/{repo}/pulls/{pull_number}/reviews",
-    {
-      owner,
-      repo,
-      pull_number: pullNumber,
-      commit_id: commitId,
-      body,
-      event,
-      comments: apiComments
-    }
-  );
-  return response.data.id;
 }
 
 // src/prompt.ts
@@ -85557,112 +85400,7 @@ ${externalSection}## Analysis
 Analyze the CI failures above in the context of the code diff. Identify which specific code changes caused the failures and respond with the JSON format specified above.`;
 }
 
-// src/action.ts
-async function action(octokit2, config4) {
-  const { prMetadata, owner, repo, geminiApiKey, model, reviewEvent } = config4;
-  const { number: pullNumber } = prMetadata;
-  const headSha = await resolveHeadSha(octokit2, owner, repo, pullNumber);
-  info(`Analyzing PR #${pullNumber} (commit: ${headSha.slice(0, 7)})`);
-  info("Fetching failed CI job logs...");
-  const [failedJobs, failedCheckRuns, failedStatuses] = await Promise.all([
-    getFailedJobs(octokit2, owner, repo, headSha),
-    getFailedCheckRuns(octokit2, owner, repo, headSha),
-    getFailedCommitStatuses(octokit2, owner, repo, headSha)
-  ]);
-  const externalFailures = [...failedCheckRuns, ...failedStatuses];
-  const totalFailures = failedJobs.length + externalFailures.length;
-  if (totalFailures === 0) {
-    info("No failed jobs found. Nothing to review.");
-    return formatStatus(null);
-  }
-  info(`Found ${failedJobs.length} failed job(s)`);
-  if (externalFailures.length > 0) {
-    info(
-      `Found ${externalFailures.length} external CI failure(s): ${externalFailures.map((f3) => f3.name).join(", ")}`
-    );
-  }
-  const fingerprint = computeFailureFingerprint(
-    headSha,
-    failedJobs,
-    externalFailures
-  );
-  info(`Failure fingerprint: ${fingerprint}`);
-  const existingFingerprint = await findExistingReviewFingerprint(
-    octokit2,
-    owner,
-    repo,
-    pullNumber
-  );
-  if (existingFingerprint === fingerprint) {
-    info(
-      `Review already posted for this failure state (fingerprint: ${fingerprint}). Skipping.`
-    );
-    return JSON.stringify(
-      "### Review Buddy\\n\\n:white_check_mark: CI failures already reviewed - see existing review comments"
-    );
-  }
-  info("Fetching PR diff...");
-  const rawDiff = await getPullRequestDiff(octokit2, owner, repo, pullNumber);
-  const diff = truncateDiff(rawDiff);
-  info(`PR diff: ${rawDiff.length} chars (${diff.length} after truncation)`);
-  const prompt = buildPrompt(diff, failedJobs, externalFailures);
-  info(`Prompt size: ${prompt.length} chars`);
-  const gemini = new GeminiClient(geminiApiKey, model);
-  let analysis;
-  try {
-    analysis = await gemini.analyzeFailure(prompt);
-  } catch (error49) {
-    warning(`Gemini analysis failed: ${error49}`);
-    return JSON.stringify(
-      "### Review Buddy\\n\\n:warning: AI analysis of CI failures could not be completed"
-    );
-  }
-  info(
-    `Gemini analysis: ${analysis.comments.length} comments, confidence: ${analysis.confidence}`
-  );
-  const reviewComments = analysis.comments.map((c) => ({
-    path: c.path,
-    line: c.line,
-    side: "RIGHT",
-    body: c.body
-  }));
-  const reviewBody = formatReviewBody(analysis, fingerprint);
-  if (reviewComments.length > 0) {
-    try {
-      const reviewId = await createPullRequestReview(
-        octokit2,
-        owner,
-        repo,
-        pullNumber,
-        headSha,
-        reviewBody,
-        reviewComments,
-        reviewEvent
-      );
-      info(
-        `Posted review #${reviewId} with ${reviewComments.length} inline comments`
-      );
-      return formatStatus(analysis, reviewId);
-    } catch (error49) {
-      warning(`Failed to create review with inline comments: ${error49}`);
-      return formatStatus(analysis);
-    }
-  }
-  return formatStatus(analysis);
-}
-function formatReviewBody(analysis, fingerprint) {
-  const badge = confidenceBadge(analysis.confidence);
-  return [
-    `## Review Buddy - CI Failure Analysis`,
-    `<!-- ${FINGERPRINT_MARKER}:${fingerprint} -->`,
-    "",
-    AI_DISCLAIMER,
-    "",
-    `${badge} **Confidence:** ${analysis.confidence}`,
-    "",
-    analysis.summary
-  ].join("\n");
-}
+// src/util.ts
 function confidenceBadge(confidence) {
   switch (confidence) {
     case "high":
@@ -85673,48 +85411,388 @@ function confidenceBadge(confidence) {
       return ":orange_circle:";
   }
 }
-var AI_DISCLAIMER = "> [!IMPORTANT]\\n> This analysis was generated by AI and may not be fully accurate. Please review the suggestions critically before applying any changes.";
-function formatStatus(analysis, reviewId) {
-  if (!analysis) {
-    return JSON.stringify(
-      "### Review Buddy\\n\\n:green_circle: No CI failures detected"
-    );
-  }
-  const badge = confidenceBadge(analysis.confidence);
-  const lines = ["### Review Buddy", "", AI_DISCLAIMER, ""];
-  if (reviewId !== void 0) {
-    lines.push(
-      `${badge} ${analysis.comments.length} CI failure comment(s) posted (confidence: ${analysis.confidence})`
-    );
-  } else if (analysis.comments.length > 0) {
-    lines.push(
-      `${badge} ${analysis.comments.length} CI failure(s) analyzed but review could not be posted (confidence: ${analysis.confidence})`
-    );
-  } else {
-    lines.push(
-      `${badge} CI failures analyzed - no code changes identified as the cause (confidence: ${analysis.confidence})`
-    );
-  }
-  lines.push("");
-  lines.push(analysis.summary);
-  return JSON.stringify(lines.join("\\n"));
+function truncateLogs(logs, maxChars = 3e4) {
+  if (logs.length <= maxChars) return logs;
+  return `... [truncated, showing last ${maxChars} chars] ...
+` + logs.slice(-maxChars);
 }
-async function resolveHeadSha(octokit2, owner, repo, pullNumber) {
+function truncateDiff(diff, maxChars = 5e4) {
+  if (diff.length <= maxChars) return diff;
+  return diff.slice(0, maxChars) + `
+... [diff truncated, showing first ${maxChars} chars] ...`;
+}
+
+// src/pull-request.ts
+var PullRequest = class {
+  constructor(octokit2, owner, repo, number4) {
+    this.octokit = octokit2;
+    this.owner = owner;
+    this.repo = repo;
+    this.number = number4;
+  }
+  async getHeadSha() {
+    const response = await this.octokit.request(
+      "GET /repos/{owner}/{repo}/pulls/{pull_number}",
+      { owner: this.owner, repo: this.repo, pull_number: this.number }
+    );
+    return response.data.head.sha;
+  }
+  async getDiff() {
+    const response = await this.octokit.request(
+      "GET /repos/{owner}/{repo}/pulls/{pull_number}",
+      {
+        owner: this.owner,
+        repo: this.repo,
+        pull_number: this.number,
+        headers: { accept: "application/vnd.github.v3.diff" }
+      }
+    );
+    return typeof response.data === "string" ? response.data : String(response.data);
+  }
+  async getFailedJobs(headSha) {
+    const runsResponse = await this.octokit.request(
+      "GET /repos/{owner}/{repo}/actions/runs",
+      {
+        owner: this.owner,
+        repo: this.repo,
+        head_sha: headSha,
+        status: "failure",
+        per_page: 100
+      }
+    );
+    const failedRuns = runsResponse.data.workflow_runs;
+    if (failedRuns.length === 0) {
+      info("No failed workflow runs found for this commit");
+      return [];
+    }
+    info(
+      `Found ${failedRuns.length} failed workflow run(s): ${failedRuns.map((r2) => r2.name).join(", ")}`
+    );
+    const results = [];
+    for (const run of failedRuns) {
+      const jobsResponse = await this.octokit.request(
+        "GET /repos/{owner}/{repo}/actions/runs/{run_id}/jobs",
+        {
+          owner: this.owner,
+          repo: this.repo,
+          run_id: run.id,
+          filter: "latest",
+          per_page: 100
+        }
+      );
+      const failedJobs = jobsResponse.data.jobs.filter(
+        (job) => job.conclusion === "failure"
+      );
+      for (const job of failedJobs) {
+        try {
+          const logs = await this.getJobLogs(job.id);
+          results.push({
+            id: job.id,
+            name: `${run.name} / ${job.name}`,
+            conclusion: job.conclusion ?? "failure",
+            logs: truncateLogs(logs)
+          });
+        } catch (error49) {
+          warning(
+            `Failed to fetch logs for job "${job.name}" (${job.id}): ${error49}`
+          );
+        }
+      }
+    }
+    if (results.length === 0) {
+      info("No failed jobs found across workflow runs");
+    }
+    return results;
+  }
+  async getFailedCheckRuns(headSha) {
+    const response = await this.octokit.request(
+      "GET /repos/{owner}/{repo}/commits/{ref}/check-runs",
+      {
+        owner: this.owner,
+        repo: this.repo,
+        ref: headSha,
+        status: "completed",
+        per_page: 100
+      }
+    );
+    return response.data.check_runs.filter(
+      (run) => run.conclusion === "failure" && run.app.slug !== "github-actions"
+    ).map(
+      (run) => ({
+        name: run.name,
+        description: run.output?.summary || `Check run from ${run.app.slug}`,
+        url: run.details_url || "",
+        source: "check-run"
+      })
+    );
+  }
+  async getFailedCommitStatuses(headSha) {
+    const response = await this.octokit.request(
+      "GET /repos/{owner}/{repo}/commits/{ref}/status",
+      { owner: this.owner, repo: this.repo, ref: headSha }
+    );
+    return response.data.statuses.filter(
+      (status) => status.state === "failure" || status.state === "error"
+    ).map(
+      (status) => ({
+        name: status.context,
+        description: status.description || "",
+        url: status.target_url || "",
+        source: "status"
+      })
+    );
+  }
+  async getJobLogs(jobId) {
+    const response = await this.octokit.request(
+      "GET /repos/{owner}/{repo}/actions/jobs/{job_id}/logs",
+      { owner: this.owner, repo: this.repo, job_id: jobId }
+    );
+    return typeof response.data === "string" ? response.data : String(response.data);
+  }
+};
+
+// src/review.ts
+import { createHash } from "node:crypto";
+var AI_DISCLAIMER = "> [!IMPORTANT]\\n> This analysis was generated by AI and may not be fully accurate. Please review the suggestions critically before applying any changes.";
+var Review = class _Review {
+  static FINGERPRINT_MARKER = "review-buddy-fingerprint";
+  static computeFingerprint(headSha, failedJobs, externalFailures) {
+    const parts = [
+      headSha,
+      ...failedJobs.map((j) => j.name).sort(),
+      ...externalFailures.map((f3) => `${f3.source}:${f3.name}`).sort()
+    ];
+    return createHash("sha256").update(parts.join("\n")).digest("hex").slice(0, 16);
+  }
+  static async findExistingFingerprint(octokit2, owner, repo, pullNumber) {
+    let page = 1;
+    while (true) {
+      const response = await octokit2.request(
+        "GET /repos/{owner}/{repo}/pulls/{pull_number}/reviews",
+        { owner, repo, pull_number: pullNumber, per_page: 100, page }
+      );
+      for (let i2 = response.data.length - 1; i2 >= 0; i2--) {
+        const review = response.data[i2];
+        const match = review.body?.match(
+          new RegExp(`<!-- ${_Review.FINGERPRINT_MARKER}:([a-f0-9]+) -->`)
+        );
+        if (match?.[1]) {
+          return match[1];
+        }
+      }
+      if (response.data.length < 100) break;
+      page++;
+    }
+    return null;
+  }
+  static formatBody(analysis, fingerprint) {
+    const badge = confidenceBadge(analysis.confidence);
+    return [
+      `## Review Buddy - CI Failure Analysis`,
+      `<!-- ${_Review.FINGERPRINT_MARKER}:${fingerprint} -->`,
+      "",
+      AI_DISCLAIMER,
+      "",
+      `${badge} **Confidence:** ${analysis.confidence}`,
+      "",
+      analysis.summary
+    ].join("\n");
+  }
+  static formatStatus(analysis, reviewId) {
+    if (!analysis) {
+      return JSON.stringify(
+        "### Review Buddy\\n\\n:green_circle: No CI failures detected"
+      );
+    }
+    const badge = confidenceBadge(analysis.confidence);
+    const lines = ["### Review Buddy", "", AI_DISCLAIMER, ""];
+    if (reviewId !== void 0) {
+      lines.push(
+        `${badge} ${analysis.comments.length} CI failure comment(s) posted (confidence: ${analysis.confidence})`
+      );
+    } else if (analysis.comments.length > 0) {
+      lines.push(
+        `${badge} ${analysis.comments.length} CI failure(s) analyzed but review could not be posted (confidence: ${analysis.confidence})`
+      );
+    } else {
+      lines.push(
+        `${badge} CI failures analyzed - no code changes identified as the cause (confidence: ${analysis.confidence})`
+      );
+    }
+    lines.push("");
+    lines.push(analysis.summary);
+    return JSON.stringify(lines.join("\\n"));
+  }
+  static formatSkippedStatus() {
+    return JSON.stringify(
+      "### Review Buddy\\n\\n:white_check_mark: CI failures already reviewed - see existing review comments"
+    );
+  }
+  static formatErrorStatus() {
+    return JSON.stringify(
+      "### Review Buddy\\n\\n:warning: AI analysis of CI failures could not be completed"
+    );
+  }
+  static async post(octokit2, owner, repo, pullNumber, commitId, body, comments, event) {
+    const apiComments = comments.map((comment) => ({
+      path: comment.path,
+      line: comment.line,
+      side: comment.side,
+      body: comment.body
+    }));
+    const response = await octokit2.request(
+      "POST /repos/{owner}/{repo}/pulls/{pull_number}/reviews",
+      {
+        owner,
+        repo,
+        pull_number: pullNumber,
+        commit_id: commitId,
+        body,
+        event,
+        comments: apiComments
+      }
+    );
+    return response.data.id;
+  }
+};
+
+// src/action.ts
+async function action(octokit2, config4) {
+  const { prMetadata, owner, repo, geminiApiKey, model, reviewEvent } = config4;
+  const pr = new PullRequest(octokit2, owner, repo, prMetadata.number);
+  const headSha = await resolveHeadSha(pr);
+  info(`Analyzing PR #${pr.number} (commit: ${headSha.slice(0, 7)})`);
+  info("Fetching failed CI job logs...");
+  const [failedJobs, failedCheckRuns, failedStatuses] = await Promise.all([
+    pr.getFailedJobs(headSha),
+    pr.getFailedCheckRuns(headSha),
+    pr.getFailedCommitStatuses(headSha)
+  ]);
+  const externalFailures = [...failedCheckRuns, ...failedStatuses];
+  const totalFailures = failedJobs.length + externalFailures.length;
+  if (totalFailures === 0) {
+    info("No failed jobs found. Nothing to review.");
+    return Review.formatStatus();
+  }
+  info(`Found ${failedJobs.length} failed job(s)`);
+  if (externalFailures.length > 0) {
+    info(
+      `Found ${externalFailures.length} external CI failure(s): ${externalFailures.map((f3) => f3.name).join(", ")}`
+    );
+  }
+  const fingerprint = Review.computeFingerprint(
+    headSha,
+    failedJobs,
+    externalFailures
+  );
+  info(`Failure fingerprint: ${fingerprint}`);
+  const existingFingerprint = await Review.findExistingFingerprint(
+    octokit2,
+    owner,
+    repo,
+    pr.number
+  );
+  if (existingFingerprint === fingerprint) {
+    info(
+      `Review already posted for this failure state (fingerprint: ${fingerprint}). Skipping.`
+    );
+    return Review.formatSkippedStatus();
+  }
+  info("Fetching PR diff...");
+  const rawDiff = await pr.getDiff();
+  const diff = truncateDiff(rawDiff);
+  info(`PR diff: ${rawDiff.length} chars (${diff.length} after truncation)`);
+  const prompt = buildPrompt(diff, failedJobs, externalFailures);
+  info(`Prompt size: ${prompt.length} chars`);
+  const gemini = new GeminiClient(geminiApiKey, model);
+  let analysis;
+  try {
+    analysis = await gemini.analyzeFailure(prompt);
+  } catch (error49) {
+    warning(`Gemini analysis failed: ${error49}`);
+    return Review.formatErrorStatus();
+  }
+  info(
+    `Gemini analysis: ${analysis.comments.length} comments, confidence: ${analysis.confidence}`
+  );
+  const reviewComments = analysis.comments.map((c) => ({
+    path: c.path,
+    line: c.line,
+    side: "RIGHT",
+    body: c.body
+  }));
+  const reviewBody = Review.formatBody(analysis, fingerprint);
+  if (reviewComments.length > 0) {
+    try {
+      const reviewId = await Review.post(
+        octokit2,
+        owner,
+        repo,
+        pr.number,
+        headSha,
+        reviewBody,
+        reviewComments,
+        reviewEvent
+      );
+      info(
+        `Posted review #${reviewId} with ${reviewComments.length} inline comments`
+      );
+      return Review.formatStatus(analysis, reviewId);
+    } catch (error49) {
+      warning(`Failed to create review with inline comments: ${error49}`);
+      return Review.formatStatus(analysis);
+    }
+  }
+  return Review.formatStatus(analysis);
+}
+async function resolveHeadSha(pr) {
   const payloadSha = context2.payload?.workflow_run?.head_sha;
   if (payloadSha) {
     info(`Head SHA from workflow_run payload: ${payloadSha}`);
     return payloadSha;
   }
   info("No workflow_run payload, fetching head SHA from PR API...");
-  return getPullRequestHeadSha(octokit2, owner, repo, pullNumber);
+  return pr.getHeadSha();
 }
-function computeFailureFingerprint(headSha, failedJobs, externalFailures) {
-  const parts = [
-    headSha,
-    ...failedJobs.map((j) => j.name).sort(),
-    ...externalFailures.map((f3) => `${f3.source}:${f3.name}`).sort()
-  ];
-  return createHash("sha256").update(parts.join("\n")).digest("hex").slice(0, 16);
+
+// src/error.ts
+var ReviewBuddyError = class extends Error {
+  constructor(message, code) {
+    super(message);
+    this.code = code;
+  }
+};
+function raise(message, code) {
+  throw new ReviewBuddyError(message, code);
+}
+
+// src/config.ts
+function getConfig() {
+  const prMetadataRaw = getInput("pr-metadata", { required: true });
+  const token = getInput("token", { required: true });
+  const geminiApiKey = getInput("gemini-api-key", { required: true });
+  const model = getInput("model") || void 0;
+  const reviewEvent = getInput("review-event") || void 0;
+  let prMetadata;
+  try {
+    prMetadata = JSON.parse(prMetadataRaw);
+  } catch {
+    raise("Failed to parse pr-metadata input as JSON");
+  }
+  const { owner, repo } = context2.repo;
+  const result = actionConfigSchema.safeParse({
+    prMetadata,
+    token,
+    geminiApiKey,
+    model,
+    reviewEvent,
+    owner,
+    repo
+  });
+  if (!result.success) {
+    raise(`Invalid action configuration: ${result.error.message}`);
+  }
+  return result.data;
 }
 
 // node_modules/@octokit/plugin-throttling/dist-bundle/index.js
@@ -86150,46 +86228,6 @@ function getOctokit(token) {
   });
 }
 
-// src/error.ts
-var ActionError = class extends Error {
-  constructor(message, code) {
-    super(message);
-    this.code = code;
-  }
-};
-function raise(error49, code) {
-  throw new ActionError(error49, code);
-}
-
-// src/config.ts
-function getConfig() {
-  const prMetadataRaw = getInput("pr-metadata", { required: true });
-  const token = getInput("token", { required: true });
-  const geminiApiKey = getInput("gemini-api-key", { required: true });
-  const model = getInput("model") || void 0;
-  const reviewEvent = getInput("review-event") || void 0;
-  let prMetadata;
-  try {
-    prMetadata = JSON.parse(prMetadataRaw);
-  } catch {
-    raise("Failed to parse pr-metadata input as JSON");
-  }
-  const { owner, repo } = context2.repo;
-  const result = actionConfigSchema.safeParse({
-    prMetadata,
-    token,
-    geminiApiKey,
-    model,
-    reviewEvent,
-    owner,
-    repo
-  });
-  if (!result.success) {
-    raise(`Invalid action configuration: ${result.error.message}`);
-  }
-  return result.data;
-}
-
 // src/main.ts
 var config3 = getConfig();
 var octokit = getOctokit(config3.token);
@@ -86203,7 +86241,7 @@ try {
   } else {
     message = JSON.stringify(error49);
   }
-  if (error49 instanceof ActionError) {
+  if (error49 instanceof ReviewBuddyError) {
     setOutput("status", message);
   }
   setFailed(message);

@@ -1,4 +1,4 @@
-export class ActionError extends Error {
+export class ReviewBuddyError extends Error {
   constructor(
     message: string,
     readonly code?: number
@@ -7,6 +7,6 @@ export class ActionError extends Error {
   }
 }
 
-export function raise(error: string, code?: number): never {
-  throw new ActionError(error, code);
+export function raise(message: string, code?: number): never {
+  throw new ReviewBuddyError(message, code);
 }

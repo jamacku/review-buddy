@@ -4,25 +4,48 @@ import action from '../src/action';
 import type { CustomOctokit } from '../src/octokit';
 import type { ActionConfig } from '../src/schema';
 
-vi.mock('../src/github', () => ({
-  FINGERPRINT_MARKER: 'review-buddy-fingerprint',
+const mockPullRequest = {
+  number: 1,
+  getHeadSha: vi.fn().mockResolvedValue('sha-from-api'),
+  getDiff: vi.fn(),
   getFailedJobs: vi.fn().mockResolvedValue([]),
   getFailedCheckRuns: vi.fn().mockResolvedValue([]),
   getFailedCommitStatuses: vi.fn().mockResolvedValue([]),
-  findExistingReviewFingerprint: vi.fn().mockResolvedValue(null),
-  getPullRequestDiff: vi.fn(),
-  getPullRequestHeadSha: vi.fn().mockResolvedValue('sha-from-api'),
-  truncateDiff: vi.fn((diff: string) => diff),
-  createPullRequestReview: vi.fn(),
+};
+
+vi.mock('../src/pull-request', () => ({
+  PullRequest: class {
+    number = mockPullRequest.number;
+    getHeadSha = mockPullRequest.getHeadSha;
+    getDiff = mockPullRequest.getDiff;
+    getFailedJobs = mockPullRequest.getFailedJobs;
+    getFailedCheckRuns = mockPullRequest.getFailedCheckRuns;
+    getFailedCommitStatuses = mockPullRequest.getFailedCommitStatuses;
+  },
 }));
 
-vi.mock('../src/gemini', () => {
+vi.mock('../src/review', async importOriginal => {
+  const { Review: OrigReview } =
+    await importOriginal<typeof import('../src/review')>();
   return {
-    GeminiClient: class {
-      analyzeFailure = vi.fn();
+    Review: {
+      FINGERPRINT_MARKER: OrigReview.FINGERPRINT_MARKER,
+      computeFingerprint: OrigReview.computeFingerprint,
+      formatBody: OrigReview.formatBody,
+      formatStatus: OrigReview.formatStatus,
+      formatSkippedStatus: OrigReview.formatSkippedStatus,
+      formatErrorStatus: OrigReview.formatErrorStatus,
+      findExistingFingerprint: vi.fn().mockResolvedValue(null),
+      post: vi.fn().mockResolvedValue(999),
     },
   };
 });
+
+vi.mock('../src/gemini', () => ({
+  GeminiClient: class {
+    analyzeFailure = vi.fn();
+  },
+}));
 
 vi.mock('@actions/core', () => ({
   info: vi.fn(),
@@ -62,16 +85,9 @@ describe('action - schedule/workflow_dispatch (no workflow_run payload)', () => 
   };
 
   test('falls back to PR API when workflow_run payload is missing', async () => {
-    const { getPullRequestHeadSha } = await import('../src/github');
-
     const status = await action({} as CustomOctokit, mockConfig);
 
-    expect(getPullRequestHeadSha).toHaveBeenCalledWith(
-      expect.anything(),
-      'owner',
-      'repo',
-      1
-    );
+    expect(mockPullRequest.getHeadSha).toHaveBeenCalled();
     expect(status).toContain('No CI failures detected');
   });
 });
