@@ -8,6 +8,7 @@ import {
   getFailedCheckRuns,
   getFailedCommitStatuses,
   getPullRequestDiff,
+  getPullRequestHeadSha,
   truncateDiff,
   createPullRequestReview,
 } from './github';
@@ -19,9 +20,9 @@ export default async function action(
   config: ActionConfig
 ): Promise<string> {
   const { prMetadata, owner, repo, geminiApiKey, model, reviewEvent } = config;
-  const { number: pullNumber, ref: commitId } = prMetadata;
+  const { number: pullNumber } = prMetadata;
 
-  const headSha = getHeadSha();
+  const headSha = await resolveHeadSha(octokit, owner, repo, pullNumber);
 
   info(`Analyzing PR #${pullNumber} (commit: ${headSha.slice(0, 7)})`);
 
@@ -78,7 +79,7 @@ export default async function action(
         owner,
         repo,
         pullNumber,
-        commitId,
+        headSha,
         reviewBody,
         analysis.comments,
         reviewEvent
@@ -153,12 +154,20 @@ function formatStatus(
   return lines.join('\n');
 }
 
-function getHeadSha(): string {
-  const headSha = context.payload?.workflow_run?.head_sha;
-  if (!headSha) {
-    throw new Error(
-      'Could not determine head SHA. This action must be triggered by a workflow_run event.'
-    );
+async function resolveHeadSha(
+  octokit: CustomOctokit,
+  owner: string,
+  repo: string,
+  pullNumber: number
+): Promise<string> {
+  // Try workflow_run payload first (available for workflow_run triggers)
+  const payloadSha = context.payload?.workflow_run?.head_sha;
+  if (payloadSha) {
+    info(`Head SHA from workflow_run payload: ${payloadSha}`);
+    return payloadSha as string;
   }
-  return headSha as string;
+
+  // Fallback: fetch head SHA from PR API (works for schedule, workflow_dispatch, etc.)
+  info('No workflow_run payload, fetching head SHA from PR API...');
+  return getPullRequestHeadSha(octokit, owner, repo, pullNumber);
 }

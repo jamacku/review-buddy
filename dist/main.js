@@ -85402,6 +85402,13 @@ async function getFailedCommitStatuses(octokit2, owner, repo, headSha) {
     })
   );
 }
+async function getPullRequestHeadSha(octokit2, owner, repo, pullNumber) {
+  const response = await octokit2.request(
+    "GET /repos/{owner}/{repo}/pulls/{pull_number}",
+    { owner, repo, pull_number: pullNumber }
+  );
+  return response.data.head.sha;
+}
 async function getPullRequestDiff(octokit2, owner, repo, pullNumber) {
   const response = await octokit2.request(
     "GET /repos/{owner}/{repo}/pulls/{pull_number}",
@@ -85522,8 +85529,8 @@ Analyze the CI failures above in the context of the code diff. Identify which sp
 // src/action.ts
 async function action(octokit2, config4) {
   const { prMetadata, owner, repo, geminiApiKey, model, reviewEvent } = config4;
-  const { number: pullNumber, ref: commitId } = prMetadata;
-  const headSha = getHeadSha();
+  const { number: pullNumber } = prMetadata;
+  const headSha = await resolveHeadSha(octokit2, owner, repo, pullNumber);
   info(`Analyzing PR #${pullNumber} (commit: ${headSha.slice(0, 7)})`);
   info("Fetching failed CI job logs...");
   const [failedJobs, failedCheckRuns, failedStatuses] = await Promise.all([
@@ -85568,7 +85575,7 @@ async function action(octokit2, config4) {
         owner,
         repo,
         pullNumber,
-        commitId,
+        headSha,
         reviewBody,
         analysis.comments,
         reviewEvent
@@ -85632,14 +85639,14 @@ function formatStatus(analysis, error49, reviewId) {
   lines.push(analysis.summary);
   return lines.join("\n");
 }
-function getHeadSha() {
-  const headSha = context2.payload?.workflow_run?.head_sha;
-  if (!headSha) {
-    throw new Error(
-      "Could not determine head SHA. This action must be triggered by a workflow_run event."
-    );
+async function resolveHeadSha(octokit2, owner, repo, pullNumber) {
+  const payloadSha = context2.payload?.workflow_run?.head_sha;
+  if (payloadSha) {
+    info(`Head SHA from workflow_run payload: ${payloadSha}`);
+    return payloadSha;
   }
-  return headSha;
+  info("No workflow_run payload, fetching head SHA from PR API...");
+  return getPullRequestHeadSha(octokit2, owner, repo, pullNumber);
 }
 
 // node_modules/@octokit/plugin-throttling/dist-bundle/index.js

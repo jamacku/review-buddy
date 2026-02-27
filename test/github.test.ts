@@ -5,6 +5,7 @@ import {
   getFailedCheckRuns,
   getFailedCommitStatuses,
   getPullRequestDiff,
+  getPullRequestHeadSha,
   truncateDiff,
   createPullRequestReview,
 } from '../src/github';
@@ -219,6 +220,25 @@ describe('getFailedJobs', () => {
 
     const result = await getFailedJobs(octokit, 'owner', 'repo', 'abc123');
     expect(result[0].logs).toBe('12345');
+  });
+});
+
+// --- getPullRequestHeadSha ---
+
+describe('getPullRequestHeadSha', () => {
+  test('returns the head SHA from PR API', async () => {
+    const requestMock = vi.fn().mockResolvedValue({
+      data: { head: { sha: 'abc123def456' } },
+    });
+    const octokit = { request: requestMock } as unknown as CustomOctokit;
+
+    const sha = await getPullRequestHeadSha(octokit, 'owner', 'repo', 42);
+
+    expect(sha).toBe('abc123def456');
+    expect(requestMock).toHaveBeenCalledWith(
+      'GET /repos/{owner}/{repo}/pulls/{pull_number}',
+      { owner: 'owner', repo: 'repo', pull_number: 42 }
+    );
   });
 });
 

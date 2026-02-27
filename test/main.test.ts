@@ -287,6 +287,7 @@ vi.mock('../src/github', () => ({
   getFailedCheckRuns: vi.fn().mockResolvedValue([]),
   getFailedCommitStatuses: vi.fn().mockResolvedValue([]),
   getPullRequestDiff: vi.fn(),
+  getPullRequestHeadSha: vi.fn().mockResolvedValue('sha-from-api'),
   truncateDiff: vi.fn((diff: string) => diff),
   createPullRequestReview: vi.fn(),
 }));

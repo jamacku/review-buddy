@@ -148,6 +148,20 @@ export async function getFailedCommitStatuses(
     );
 }
 
+export async function getPullRequestHeadSha(
+  octokit: CustomOctokit,
+  owner: string,
+  repo: string,
+  pullNumber: number
+): Promise<string> {
+  const response = await octokit.request(
+    'GET /repos/{owner}/{repo}/pulls/{pull_number}',
+    { owner, repo, pull_number: pullNumber }
+  );
+
+  return response.data.head.sha;
+}
+
 export async function getPullRequestDiff(
   octokit: CustomOctokit,
   owner: string,

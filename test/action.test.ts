@@ -9,6 +9,7 @@ vi.mock('../src/github', () => ({
   getFailedCheckRuns: vi.fn().mockResolvedValue([]),
   getFailedCommitStatuses: vi.fn().mockResolvedValue([]),
   getPullRequestDiff: vi.fn(),
+  getPullRequestHeadSha: vi.fn().mockResolvedValue('sha-from-api'),
   truncateDiff: vi.fn((diff: string) => diff),
   createPullRequestReview: vi.fn(),
 }));
@@ -33,14 +34,12 @@ vi.mock('@actions/github', async importOriginal => {
     context: {
       ...original.context,
       repo: { owner: 'test-owner', repo: 'test-repo' },
-      payload: {
-        workflow_run: {},
-      },
+      payload: {},
     },
   };
 });
 
-describe('action - missing workflow_run context', () => {
+describe('action - schedule/workflow_dispatch (no workflow_run payload)', () => {
   const mockConfig: ActionConfig = {
     prMetadata: {
       number: 1,
@@ -60,9 +59,17 @@ describe('action - missing workflow_run context', () => {
     repo: 'repo',
   };
 
-  test('throws when head_sha is missing from workflow_run payload', async () => {
-    await expect(action({} as CustomOctokit, mockConfig)).rejects.toThrow(
-      'Could not determine head SHA'
+  test('falls back to PR API when workflow_run payload is missing', async () => {
+    const { getPullRequestHeadSha } = await import('../src/github');
+
+    const status = await action({} as CustomOctokit, mockConfig);
+
+    expect(getPullRequestHeadSha).toHaveBeenCalledWith(
+      expect.anything(),
+      'owner',
+      'repo',
+      1
     );
+    expect(status).toContain('No CI failures detected');
   });
 });
