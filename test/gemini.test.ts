@@ -26,9 +26,7 @@ describe('GeminiClient', () => {
   test('parses valid JSON response', async () => {
     const expected = {
       summary: 'Missing null check causes test failure',
-      comments: [
-        { path: 'src/app.ts', line: 5, side: 'RIGHT', body: 'Add null check' },
-      ],
+      comments: [{ path: 'src/app.ts', line: 5, body: 'Add null check' }],
       confidence: 'high',
     };
 
@@ -127,7 +125,7 @@ describe('GeminiClient', () => {
     mockGenerateContent.mockResolvedValue({
       text: JSON.stringify({
         summary: 'Bug found',
-        comments: [{ path: 'a.ts', line: 0, side: 'RIGHT', body: 'fix' }],
+        comments: [{ path: 'a.ts', line: 0, body: 'fix' }],
         confidence: 'high',
       }),
     });

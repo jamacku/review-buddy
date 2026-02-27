@@ -51,7 +51,6 @@ You MUST respond with a JSON object matching this exact structure:
     {
       "path": "relative/path/to/file.ts",
       "line": 42,
-      "side": "RIGHT",
       "body": "Markdown-formatted review comment explaining the issue and suggesting a fix."
     }
   ],

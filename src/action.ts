@@ -13,7 +13,11 @@ import {
   createPullRequestReview,
 } from './github';
 import { buildPrompt } from './prompt';
-import type { ActionConfig, GeminiReviewResponse } from './schema';
+import type {
+  ActionConfig,
+  GeminiReviewResponse,
+  ReviewComment,
+} from './schema';
 
 export default async function action(
   octokit: CustomOctokit,
@@ -63,16 +67,24 @@ export default async function action(
     analysis = await gemini.analyzeFailure(prompt);
   } catch (error) {
     warning(`Gemini analysis failed: ${error}`);
-    return formatStatus(null, error);
+    return '';
   }
 
   info(
     `Gemini analysis: ${analysis.comments.length} comments, confidence: ${analysis.confidence}`
   );
 
+  // Map Gemini comments to ReviewComments (add side: RIGHT)
+  const reviewComments: ReviewComment[] = analysis.comments.map(c => ({
+    path: c.path,
+    line: c.line,
+    side: 'RIGHT' as const,
+    body: c.body,
+  }));
+
   const reviewBody = formatReviewBody(analysis);
 
-  if (analysis.comments.length > 0) {
+  if (reviewComments.length > 0) {
     try {
       const reviewId = await createPullRequestReview(
         octokit,
@@ -81,13 +93,13 @@ export default async function action(
         pullNumber,
         headSha,
         reviewBody,
-        analysis.comments,
+        reviewComments,
         reviewEvent
       );
       info(
-        `Posted review #${reviewId} with ${analysis.comments.length} inline comments`
+        `Posted review #${reviewId} with ${reviewComments.length} inline comments`
       );
-      return formatStatus(analysis, undefined, reviewId);
+      return formatStatus(analysis, reviewId);
     } catch (error) {
       warning(`Failed to create review with inline comments: ${error}`);
       return formatStatus(analysis);
@@ -115,24 +127,14 @@ function confidenceBadge(confidence: string): string {
 
 function formatStatus(
   analysis: GeminiReviewResponse | null,
-  error?: unknown,
   reviewId?: number
 ): string {
-  const lines: string[] = [];
-
-  if (error) {
-    lines.push(
-      `:warning: AI analysis of CI failures could not be completed - ${error instanceof Error ? error.message : String(error)}`
-    );
-    return lines.join('\n');
-  }
-
   if (!analysis) {
-    lines.push(':green_circle: No CI failures detected');
-    return lines.join('\n');
+    return ':green_circle: No CI failures detected';
   }
 
   const badge = confidenceBadge(analysis.confidence);
+  const lines: string[] = [];
 
   if (reviewId !== undefined) {
     lines.push(

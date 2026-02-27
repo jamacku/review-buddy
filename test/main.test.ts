@@ -99,7 +99,6 @@ describe('geminiReviewResponseSchema', () => {
         {
           path: 'src/main.ts',
           line: 10,
-          side: 'RIGHT' as const,
           body: 'Missing import for `foo`',
         },
       ],
@@ -131,17 +130,7 @@ describe('geminiReviewResponseSchema', () => {
     expect(() =>
       geminiReviewResponseSchema.parse({
         summary: 'test',
-        comments: [{ path: 'a.ts', line: -1, side: 'RIGHT', body: 'bad' }],
-        confidence: 'high',
-      })
-    ).toThrow();
-  });
-
-  test('rejects comment with wrong side', () => {
-    expect(() =>
-      geminiReviewResponseSchema.parse({
-        summary: 'test',
-        comments: [{ path: 'a.ts', line: 1, side: 'LEFT', body: 'bad' }],
+        comments: [{ path: 'a.ts', line: -1, body: 'bad' }],
         confidence: 'high',
       })
     ).toThrow();
@@ -364,7 +353,6 @@ describe('action', () => {
         {
           path: 'src/main.ts',
           line: 10,
-          side: 'RIGHT',
           body: 'Add null check',
         },
       ],
@@ -382,7 +370,11 @@ describe('action', () => {
       'abc1234567890',
       expect.stringContaining('Review Buddy'),
       expect.arrayContaining([
-        expect.objectContaining({ path: 'src/main.ts', line: 10 }),
+        expect.objectContaining({
+          path: 'src/main.ts',
+          line: 10,
+          side: 'RIGHT',
+        }),
       ]),
       'COMMENT'
     );
@@ -407,7 +399,7 @@ describe('action', () => {
     expect(status).toContain('low');
   });
 
-  test('returns warning status when Gemini fails with Error', async () => {
+  test('returns empty status when Gemini fails', async () => {
     const { getFailedJobs, getPullRequestDiff } = await import('../src/github');
 
     vi.mocked(getFailedJobs).mockResolvedValue([
@@ -418,23 +410,7 @@ describe('action', () => {
     mockAnalyzeFailure.mockRejectedValue(new Error('API quota exceeded'));
 
     const status = await action({} as CustomOctokit, mockConfig);
-    expect(status).toContain('could not be completed');
-    expect(status).toContain('API quota exceeded');
-  });
-
-  test('returns warning status when Gemini fails with non-Error', async () => {
-    const { getFailedJobs, getPullRequestDiff } = await import('../src/github');
-
-    vi.mocked(getFailedJobs).mockResolvedValue([
-      { id: 1, name: 'test', conclusion: 'failure', logs: 'Error' },
-    ]);
-    vi.mocked(getPullRequestDiff).mockResolvedValue('diff');
-
-    mockAnalyzeFailure.mockRejectedValue('string error');
-
-    const status = await action({} as CustomOctokit, mockConfig);
-    expect(status).toContain('could not be completed');
-    expect(status).toContain('string error');
+    expect(status).toBe('');
   });
 
   test('handles review creation failure gracefully', async () => {
@@ -451,9 +427,7 @@ describe('action', () => {
 
     mockAnalyzeFailure.mockResolvedValue({
       summary: 'Bug in the code',
-      comments: [
-        { path: 'src/main.ts', line: 99, side: 'RIGHT', body: 'Fix this' },
-      ],
+      comments: [{ path: 'src/main.ts', line: 99, body: 'Fix this' }],
       confidence: 'medium',
     });
 

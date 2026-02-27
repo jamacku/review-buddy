@@ -85257,15 +85257,14 @@ var actionConfigSchema = external_exports.object({
   owner: external_exports.string(),
   repo: external_exports.string()
 });
-var reviewCommentSchema = external_exports.object({
+var geminiCommentSchema = external_exports.object({
   path: external_exports.string(),
   line: external_exports.number().int().positive(),
-  side: external_exports.literal("RIGHT"),
   body: external_exports.string()
 });
 var geminiReviewResponseSchema = external_exports.object({
   summary: external_exports.string(),
-  comments: external_exports.array(reviewCommentSchema),
+  comments: external_exports.array(geminiCommentSchema),
   confidence: external_exports.enum(["high", "medium", "low"])
 });
 
@@ -85488,7 +85487,6 @@ You MUST respond with a JSON object matching this exact structure:
     {
       "path": "relative/path/to/file.ts",
       "line": 42,
-      "side": "RIGHT",
       "body": "Markdown-formatted review comment explaining the issue and suggesting a fix."
     }
   ],
@@ -85562,13 +85560,19 @@ async function action(octokit2, config4) {
     analysis = await gemini.analyzeFailure(prompt);
   } catch (error49) {
     warning(`Gemini analysis failed: ${error49}`);
-    return formatStatus(null, error49);
+    return "";
   }
   info(
     `Gemini analysis: ${analysis.comments.length} comments, confidence: ${analysis.confidence}`
   );
+  const reviewComments = analysis.comments.map((c) => ({
+    path: c.path,
+    line: c.line,
+    side: "RIGHT",
+    body: c.body
+  }));
   const reviewBody = formatReviewBody(analysis);
-  if (analysis.comments.length > 0) {
+  if (reviewComments.length > 0) {
     try {
       const reviewId = await createPullRequestReview(
         octokit2,
@@ -85577,13 +85581,13 @@ async function action(octokit2, config4) {
         pullNumber,
         headSha,
         reviewBody,
-        analysis.comments,
+        reviewComments,
         reviewEvent
       );
       info(
-        `Posted review #${reviewId} with ${analysis.comments.length} inline comments`
+        `Posted review #${reviewId} with ${reviewComments.length} inline comments`
       );
-      return formatStatus(analysis, void 0, reviewId);
+      return formatStatus(analysis, reviewId);
     } catch (error49) {
       warning(`Failed to create review with inline comments: ${error49}`);
       return formatStatus(analysis);
@@ -85609,19 +85613,12 @@ function confidenceBadge(confidence) {
       return ":orange_circle:";
   }
 }
-function formatStatus(analysis, error49, reviewId) {
-  const lines = [];
-  if (error49) {
-    lines.push(
-      `:warning: AI analysis of CI failures could not be completed - ${error49 instanceof Error ? error49.message : String(error49)}`
-    );
-    return lines.join("\n");
-  }
+function formatStatus(analysis, reviewId) {
   if (!analysis) {
-    lines.push(":green_circle: No CI failures detected");
-    return lines.join("\n");
+    return ":green_circle: No CI failures detected";
   }
   const badge = confidenceBadge(analysis.confidence);
+  const lines = [];
   if (reviewId !== void 0) {
     lines.push(
       `${badge} ${analysis.comments.length} CI failure comment(s) posted (confidence: ${analysis.confidence})`

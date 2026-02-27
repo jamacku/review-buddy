@@ -56,22 +56,28 @@ export const actionConfigSchema = z.object({
 
 export type ActionConfig = z.infer<typeof actionConfigSchema>;
 
-export const reviewCommentSchema = z.object({
+export const geminiCommentSchema = z.object({
   path: z.string(),
   line: z.number().int().positive(),
-  side: z.literal('RIGHT'),
   body: z.string(),
 });
 
-export type ReviewComment = z.infer<typeof reviewCommentSchema>;
+export type GeminiComment = z.infer<typeof geminiCommentSchema>;
 
 export const geminiReviewResponseSchema = z.object({
   summary: z.string(),
-  comments: z.array(reviewCommentSchema),
+  comments: z.array(geminiCommentSchema),
   confidence: z.enum(['high', 'medium', 'low']),
 });
 
 export type GeminiReviewResponse = z.infer<typeof geminiReviewResponseSchema>;
+
+export interface ReviewComment {
+  path: string;
+  line: number;
+  side: 'RIGHT';
+  body: string;
+}
 
 export interface FailedJob {
   id: number;
