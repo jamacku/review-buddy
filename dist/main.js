@@ -85597,7 +85597,9 @@ async function action(octokit2, config4) {
     info(
       `Review already posted for this failure state (fingerprint: ${fingerprint}). Skipping.`
     );
-    return "";
+    return JSON.stringify(
+      "### Review Buddy\\n\\n:white_check_mark: CI failures already reviewed - see existing review comments"
+    );
   }
   info("Fetching PR diff...");
   const rawDiff = await getPullRequestDiff(octokit2, owner, repo, pullNumber);
@@ -85611,7 +85613,9 @@ async function action(octokit2, config4) {
     analysis = await gemini.analyzeFailure(prompt);
   } catch (error49) {
     warning(`Gemini analysis failed: ${error49}`);
-    return "";
+    return JSON.stringify(
+      "### Review Buddy\\n\\n:warning: AI analysis of CI failures could not be completed"
+    );
   }
   info(
     `Gemini analysis: ${analysis.comments.length} comments, confidence: ${analysis.confidence}`

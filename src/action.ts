@@ -76,7 +76,9 @@ export default async function action(
     info(
       `Review already posted for this failure state (fingerprint: ${fingerprint}). Skipping.`
     );
-    return '';
+    return JSON.stringify(
+      '### Review Buddy\\n\\n:white_check_mark: CI failures already reviewed - see existing review comments'
+    );
   }
 
   info('Fetching PR diff...');
@@ -94,7 +96,9 @@ export default async function action(
     analysis = await gemini.analyzeFailure(prompt);
   } catch (error) {
     warning(`Gemini analysis failed: ${error}`);
-    return '';
+    return JSON.stringify(
+      '### Review Buddy\\n\\n:warning: AI analysis of CI failures could not be completed'
+    );
   }
 
   info(

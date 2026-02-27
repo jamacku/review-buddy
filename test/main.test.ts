@@ -402,7 +402,7 @@ describe('action', () => {
     expect(status).toContain('low');
   });
 
-  test('returns empty status when Gemini fails', async () => {
+  test('returns warning status when Gemini fails', async () => {
     const { getFailedJobs, getPullRequestDiff } = await import('../src/github');
 
     vi.mocked(getFailedJobs).mockResolvedValue([
@@ -413,7 +413,7 @@ describe('action', () => {
     mockAnalyzeFailure.mockRejectedValue(new Error('API quota exceeded'));
 
     const status = await action({} as CustomOctokit, mockConfig);
-    expect(status).toBe('');
+    expect(status).toContain('could not be completed');
   });
 
   test('handles review creation failure gracefully', async () => {
@@ -458,7 +458,7 @@ describe('action', () => {
     );
 
     const status = await action({} as CustomOctokit, mockConfig);
-    expect(status).toBe('');
+    expect(status).toContain('already reviewed');
     expect(mockAnalyzeFailure).not.toHaveBeenCalled();
   });
 
