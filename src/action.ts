@@ -1,12 +1,16 @@
+import { createHash } from 'node:crypto';
+
 import { info, warning } from '@actions/core';
 import { context } from '@actions/github';
 
 import type { CustomOctokit } from './octokit';
 import { GeminiClient } from './gemini';
 import {
+  FINGERPRINT_MARKER,
   getFailedJobs,
   getFailedCheckRuns,
   getFailedCommitStatuses,
+  findExistingReviewFingerprint,
   getPullRequestDiff,
   getPullRequestHeadSha,
   truncateDiff,
@@ -15,6 +19,8 @@ import {
 import { buildPrompt } from './prompt';
 import type {
   ActionConfig,
+  ExternalFailure,
+  FailedJob,
   GeminiReviewResponse,
   ReviewComment,
 } from './schema';
@@ -52,6 +58,27 @@ export default async function action(
     );
   }
 
+  const fingerprint = computeFailureFingerprint(
+    headSha,
+    failedJobs,
+    externalFailures
+  );
+  info(`Failure fingerprint: ${fingerprint}`);
+
+  const existingFingerprint = await findExistingReviewFingerprint(
+    octokit,
+    owner,
+    repo,
+    pullNumber
+  );
+
+  if (existingFingerprint === fingerprint) {
+    info(
+      `Review already posted for this failure state (fingerprint: ${fingerprint}). Skipping.`
+    );
+    return '';
+  }
+
   info('Fetching PR diff...');
   const rawDiff = await getPullRequestDiff(octokit, owner, repo, pullNumber);
   const diff = truncateDiff(rawDiff);
@@ -82,7 +109,7 @@ export default async function action(
     body: c.body,
   }));
 
-  const reviewBody = formatReviewBody(analysis);
+  const reviewBody = formatReviewBody(analysis, fingerprint);
 
   if (reviewComments.length > 0) {
     try {
@@ -109,9 +136,12 @@ export default async function action(
   return formatStatus(analysis);
 }
 
-function formatReviewBody(analysis: GeminiReviewResponse): string {
+function formatReviewBody(
+  analysis: GeminiReviewResponse,
+  fingerprint: string
+): string {
   const badge = confidenceBadge(analysis.confidence);
-  return `## Review Buddy - CI Failure Analysis\n\n${badge} **Confidence:** ${analysis.confidence}\n\n${analysis.summary}`;
+  return `## Review Buddy - CI Failure Analysis\n<!-- ${FINGERPRINT_MARKER}:${fingerprint} -->\n\n${badge} **Confidence:** ${analysis.confidence}\n\n${analysis.summary}`;
 }
 
 function confidenceBadge(confidence: string): string {
@@ -175,4 +205,20 @@ async function resolveHeadSha(
   // Fallback: fetch head SHA from PR API (works for schedule, workflow_dispatch, etc.)
   info('No workflow_run payload, fetching head SHA from PR API...');
   return getPullRequestHeadSha(octokit, owner, repo, pullNumber);
+}
+
+export function computeFailureFingerprint(
+  headSha: string,
+  failedJobs: FailedJob[],
+  externalFailures: ExternalFailure[]
+): string {
+  const parts = [
+    headSha,
+    ...failedJobs.map(j => j.name).sort(),
+    ...externalFailures.map(f => `${f.source}:${f.name}`).sort(),
+  ];
+  return createHash('sha256')
+    .update(parts.join('\n'))
+    .digest('hex')
+    .slice(0, 16);
 }

@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 
-import action from '../src/action';
+import action, { computeFailureFingerprint } from '../src/action';
 import type { CustomOctokit } from '../src/octokit';
 import { getConfig } from '../src/config';
 import { buildPrompt } from '../src/prompt';
@@ -272,9 +272,11 @@ describe('getConfig', () => {
 // --- Action orchestration tests ---
 
 vi.mock('../src/github', () => ({
+  FINGERPRINT_MARKER: 'review-buddy-fingerprint',
   getFailedJobs: vi.fn(),
   getFailedCheckRuns: vi.fn().mockResolvedValue([]),
   getFailedCommitStatuses: vi.fn().mockResolvedValue([]),
+  findExistingReviewFingerprint: vi.fn().mockResolvedValue(null),
   getPullRequestDiff: vi.fn(),
   getPullRequestHeadSha: vi.fn().mockResolvedValue('sha-from-api'),
   truncateDiff: vi.fn((diff: string) => diff),
@@ -327,6 +329,7 @@ describe('action', () => {
 
   afterEach(() => {
     vi.restoreAllMocks();
+    mockAnalyzeFailure.mockReset();
   });
 
   test('returns no-failure status when no jobs failed', async () => {
@@ -434,5 +437,126 @@ describe('action', () => {
     const status = await action({} as CustomOctokit, mockConfig);
     expect(status).toContain('review could not be posted');
     expect(status).toContain('medium');
+  });
+
+  test('skips review when fingerprint matches existing review', async () => {
+    const { getFailedJobs, findExistingReviewFingerprint } =
+      await import('../src/github');
+
+    vi.mocked(getFailedJobs).mockResolvedValue([
+      { id: 1, name: 'test', conclusion: 'failure', logs: 'Error' },
+    ]);
+
+    // Compute expected fingerprint and return it as existing
+    const expectedFingerprint = computeFailureFingerprint(
+      'abc1234567890',
+      [{ id: 1, name: 'test', conclusion: 'failure', logs: 'Error' }],
+      []
+    );
+    vi.mocked(findExistingReviewFingerprint).mockResolvedValue(
+      expectedFingerprint
+    );
+
+    const status = await action({} as CustomOctokit, mockConfig);
+    expect(status).toBe('');
+    expect(mockAnalyzeFailure).not.toHaveBeenCalled();
+  });
+
+  test('proceeds when fingerprint does not match', async () => {
+    const {
+      getFailedJobs,
+      getPullRequestDiff,
+      findExistingReviewFingerprint,
+      createPullRequestReview,
+    } = await import('../src/github');
+
+    vi.mocked(getFailedJobs).mockResolvedValue([
+      { id: 1, name: 'test', conclusion: 'failure', logs: 'Error' },
+    ]);
+    vi.mocked(getPullRequestDiff).mockResolvedValue('diff');
+    vi.mocked(findExistingReviewFingerprint).mockResolvedValue(
+      'different-fingerprint'
+    );
+    vi.mocked(createPullRequestReview).mockResolvedValue(123);
+
+    mockAnalyzeFailure.mockResolvedValue({
+      summary: 'Bug',
+      comments: [{ path: 'a.ts', line: 1, body: 'fix' }],
+      confidence: 'high',
+    });
+
+    const status = await action({} as CustomOctokit, mockConfig);
+    expect(status).toContain('CI failure comment(s) posted');
+    expect(mockAnalyzeFailure).toHaveBeenCalled();
+  });
+});
+
+// --- Fingerprint tests ---
+
+describe('computeFailureFingerprint', () => {
+  test('produces deterministic output', () => {
+    const jobs = [{ id: 1, name: 'test', conclusion: 'failure', logs: 'log' }];
+    const fp1 = computeFailureFingerprint('sha1', jobs, []);
+    const fp2 = computeFailureFingerprint('sha1', jobs, []);
+    expect(fp1).toBe(fp2);
+    expect(fp1).toHaveLength(16);
+  });
+
+  test('different head SHA produces different fingerprint', () => {
+    const jobs = [{ id: 1, name: 'test', conclusion: 'failure', logs: 'log' }];
+    const fp1 = computeFailureFingerprint('sha1', jobs, []);
+    const fp2 = computeFailureFingerprint('sha2', jobs, []);
+    expect(fp1).not.toBe(fp2);
+  });
+
+  test('different failure set produces different fingerprint', () => {
+    const fp1 = computeFailureFingerprint(
+      'sha1',
+      [{ id: 1, name: 'test', conclusion: 'failure', logs: 'log' }],
+      []
+    );
+    const fp2 = computeFailureFingerprint(
+      'sha1',
+      [{ id: 2, name: 'lint', conclusion: 'failure', logs: 'log' }],
+      []
+    );
+    expect(fp1).not.toBe(fp2);
+  });
+
+  test('job order does not affect fingerprint', () => {
+    const fp1 = computeFailureFingerprint(
+      'sha1',
+      [
+        { id: 1, name: 'alpha', conclusion: 'failure', logs: 'log' },
+        { id: 2, name: 'beta', conclusion: 'failure', logs: 'log' },
+      ],
+      []
+    );
+    const fp2 = computeFailureFingerprint(
+      'sha1',
+      [
+        { id: 2, name: 'beta', conclusion: 'failure', logs: 'log' },
+        { id: 1, name: 'alpha', conclusion: 'failure', logs: 'log' },
+      ],
+      []
+    );
+    expect(fp1).toBe(fp2);
+  });
+
+  test('includes external failures in fingerprint', () => {
+    const fp1 = computeFailureFingerprint('sha1', [], []);
+    const fp2 = computeFailureFingerprint(
+      'sha1',
+      [],
+      [
+        {
+          name: 'CentOS CI',
+          description: 'failed',
+          url: 'http://ci.example.com',
+          source: 'status',
+        },
+      ]
+    );
+    expect(fp1).not.toBe(fp2);
   });
 });

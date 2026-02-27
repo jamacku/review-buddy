@@ -4,6 +4,7 @@ import {
   getFailedJobs,
   getFailedCheckRuns,
   getFailedCommitStatuses,
+  findExistingReviewFingerprint,
   getPullRequestDiff,
   getPullRequestHeadSha,
   truncateDiff,
@@ -220,6 +221,82 @@ describe('getFailedJobs', () => {
 
     const result = await getFailedJobs(octokit, 'owner', 'repo', 'abc123');
     expect(result[0].logs).toBe('12345');
+  });
+});
+
+// --- findExistingReviewFingerprint ---
+
+describe('findExistingReviewFingerprint', () => {
+  test('returns fingerprint from existing review', async () => {
+    const octokit = createMockOctokit(route => {
+      if (route.includes('/reviews')) {
+        return [
+          { body: 'Some other review', user: { login: 'user1' } },
+          {
+            body: '## Review Buddy\n<!-- review-buddy-fingerprint:abc123def456 -->\nanalysis',
+            user: { login: 'github-actions[bot]' },
+          },
+        ];
+      }
+      throw new Error(`Unexpected: ${route}`);
+    });
+
+    const fp = await findExistingReviewFingerprint(octokit, 'owner', 'repo', 1);
+    expect(fp).toBe('abc123def456');
+  });
+
+  test('returns null when no Review Buddy reviews exist', async () => {
+    const octokit = createMockOctokit(route => {
+      if (route.includes('/reviews')) {
+        return [
+          { body: 'LGTM', user: { login: 'user1' } },
+          { body: 'Nice work', user: { login: 'user2' } },
+        ];
+      }
+      throw new Error(`Unexpected: ${route}`);
+    });
+
+    const fp = await findExistingReviewFingerprint(octokit, 'owner', 'repo', 1);
+    expect(fp).toBeNull();
+  });
+
+  test('returns most recent fingerprint', async () => {
+    const octokit = createMockOctokit(route => {
+      if (route.includes('/reviews')) {
+        return [
+          {
+            body: '<!-- review-buddy-fingerprint:aaa111bbb222ccc3 -->',
+            user: { login: 'github-actions[bot]' },
+          },
+          {
+            body: '<!-- review-buddy-fingerprint:ddd444eee555fff6 -->',
+            user: { login: 'github-actions[bot]' },
+          },
+        ];
+      }
+      throw new Error(`Unexpected: ${route}`);
+    });
+
+    const fp = await findExistingReviewFingerprint(octokit, 'owner', 'repo', 1);
+    // Should return the most recent (last in API response, searched from end)
+    expect(fp).toBe('ddd444eee555fff6');
+  });
+
+  test('returns null when reviews have no fingerprint', async () => {
+    const octokit = createMockOctokit(route => {
+      if (route.includes('/reviews')) {
+        return [
+          {
+            body: '## Review Buddy - no fingerprint here',
+            user: { login: 'github-actions[bot]' },
+          },
+        ];
+      }
+      throw new Error(`Unexpected: ${route}`);
+    });
+
+    const fp = await findExistingReviewFingerprint(octokit, 'owner', 'repo', 1);
+    expect(fp).toBeNull();
   });
 });
 

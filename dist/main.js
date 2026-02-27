@@ -40064,7 +40064,7 @@ var require_websocket2 = __commonJS({
     var http3 = __require("http");
     var net = __require("net");
     var tls = __require("tls");
-    var { randomBytes, createHash } = __require("crypto");
+    var { randomBytes, createHash: createHash2 } = __require("crypto");
     var { Duplex, Readable: Readable2 } = __require("stream");
     var { URL: URL2 } = __require("url");
     var PerMessageDeflate = require_permessage_deflate2();
@@ -40724,7 +40724,7 @@ var require_websocket2 = __commonJS({
           abortHandshake(websocket, socket, "Invalid Upgrade header");
           return;
         }
-        const digest = createHash("sha1").update(key + GUID).digest("base64");
+        const digest = createHash2("sha1").update(key + GUID).digest("base64");
         if (res.headers["sec-websocket-accept"] !== digest) {
           abortHandshake(websocket, socket, "Invalid Sec-WebSocket-Accept header");
           return;
@@ -41091,7 +41091,7 @@ var require_websocket_server = __commonJS({
     var EventEmitter = __require("events");
     var http3 = __require("http");
     var { Duplex } = __require("stream");
-    var { createHash } = __require("crypto");
+    var { createHash: createHash2 } = __require("crypto");
     var extension = require_extension();
     var PerMessageDeflate = require_permessage_deflate2();
     var subprotocol = require_subprotocol();
@@ -41392,7 +41392,7 @@ var require_websocket_server = __commonJS({
           );
         }
         if (this._state > RUNNING) return abortHandshake(socket, 503);
-        const digest = createHash("sha1").update(key + GUID).digest("base64");
+        const digest = createHash2("sha1").update(key + GUID).digest("base64");
         const headers = [
           "HTTP/1.1 101 Switching Protocols",
           "Upgrade: websocket",
@@ -50579,6 +50579,9 @@ function warning(message, properties = {}) {
 function info(message) {
   process.stdout.write(message + os4.EOL);
 }
+
+// src/action.ts
+import { createHash } from "node:crypto";
 
 // node_modules/@actions/github/lib/context.js
 import { readFileSync, existsSync as existsSync2 } from "fs";
@@ -85425,6 +85428,28 @@ function truncateDiff(diff, maxChars = 5e4) {
   return diff.slice(0, maxChars) + `
 ... [diff truncated, showing first ${maxChars} chars] ...`;
 }
+var FINGERPRINT_MARKER = "review-buddy-fingerprint";
+async function findExistingReviewFingerprint(octokit2, owner, repo, pullNumber) {
+  let page = 1;
+  while (true) {
+    const response = await octokit2.request(
+      "GET /repos/{owner}/{repo}/pulls/{pull_number}/reviews",
+      { owner, repo, pull_number: pullNumber, per_page: 100, page }
+    );
+    for (let i2 = response.data.length - 1; i2 >= 0; i2--) {
+      const review = response.data[i2];
+      const match = review.body?.match(
+        new RegExp(`<!-- ${FINGERPRINT_MARKER}:([a-f0-9]+) -->`)
+      );
+      if (match?.[1]) {
+        return match[1];
+      }
+    }
+    if (response.data.length < 100) break;
+    page++;
+  }
+  return null;
+}
 async function createPullRequestReview(octokit2, owner, repo, pullNumber, commitId, body, comments, event) {
   const apiComments = comments.map((comment) => ({
     path: comment.path,
@@ -85548,6 +85573,24 @@ async function action(octokit2, config4) {
       `Found ${externalFailures.length} external CI failure(s): ${externalFailures.map((f3) => f3.name).join(", ")}`
     );
   }
+  const fingerprint = computeFailureFingerprint(
+    headSha,
+    failedJobs,
+    externalFailures
+  );
+  info(`Failure fingerprint: ${fingerprint}`);
+  const existingFingerprint = await findExistingReviewFingerprint(
+    octokit2,
+    owner,
+    repo,
+    pullNumber
+  );
+  if (existingFingerprint === fingerprint) {
+    info(
+      `Review already posted for this failure state (fingerprint: ${fingerprint}). Skipping.`
+    );
+    return "";
+  }
   info("Fetching PR diff...");
   const rawDiff = await getPullRequestDiff(octokit2, owner, repo, pullNumber);
   const diff = truncateDiff(rawDiff);
@@ -85571,7 +85614,7 @@ async function action(octokit2, config4) {
     side: "RIGHT",
     body: c.body
   }));
-  const reviewBody = formatReviewBody(analysis);
+  const reviewBody = formatReviewBody(analysis, fingerprint);
   if (reviewComments.length > 0) {
     try {
       const reviewId = await createPullRequestReview(
@@ -85595,9 +85638,10 @@ async function action(octokit2, config4) {
   }
   return formatStatus(analysis);
 }
-function formatReviewBody(analysis) {
+function formatReviewBody(analysis, fingerprint) {
   const badge = confidenceBadge(analysis.confidence);
   return `## Review Buddy - CI Failure Analysis
+<!-- ${FINGERPRINT_MARKER}:${fingerprint} -->
 
 ${badge} **Confidence:** ${analysis.confidence}
 
@@ -85646,6 +85690,14 @@ async function resolveHeadSha(octokit2, owner, repo, pullNumber) {
   }
   info("No workflow_run payload, fetching head SHA from PR API...");
   return getPullRequestHeadSha(octokit2, owner, repo, pullNumber);
+}
+function computeFailureFingerprint(headSha, failedJobs, externalFailures) {
+  const parts = [
+    headSha,
+    ...failedJobs.map((j) => j.name).sort(),
+    ...externalFailures.map((f3) => `${f3.source}:${f3.name}`).sort()
+  ];
+  return createHash("sha256").update(parts.join("\n")).digest("hex").slice(0, 16);
 }
 
 // node_modules/@octokit/plugin-throttling/dist-bundle/index.js

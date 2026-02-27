@@ -5,9 +5,11 @@ import type { CustomOctokit } from '../src/octokit';
 import type { ActionConfig } from '../src/schema';
 
 vi.mock('../src/github', () => ({
+  FINGERPRINT_MARKER: 'review-buddy-fingerprint',
   getFailedJobs: vi.fn().mockResolvedValue([]),
   getFailedCheckRuns: vi.fn().mockResolvedValue([]),
   getFailedCommitStatuses: vi.fn().mockResolvedValue([]),
+  findExistingReviewFingerprint: vi.fn().mockResolvedValue(null),
   getPullRequestDiff: vi.fn(),
   getPullRequestHeadSha: vi.fn().mockResolvedValue('sha-from-api'),
   truncateDiff: vi.fn((diff: string) => diff),

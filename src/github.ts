@@ -191,6 +191,40 @@ export function truncateDiff(diff: string, maxChars: number = 50_000): string {
   );
 }
 
+export const FINGERPRINT_MARKER = 'review-buddy-fingerprint';
+
+export async function findExistingReviewFingerprint(
+  octokit: CustomOctokit,
+  owner: string,
+  repo: string,
+  pullNumber: number
+): Promise<string | null> {
+  let page = 1;
+
+  while (true) {
+    const response = await octokit.request(
+      'GET /repos/{owner}/{repo}/pulls/{pull_number}/reviews',
+      { owner, repo, pull_number: pullNumber, per_page: 100, page }
+    );
+
+    // Search from the end (most recent) for efficiency
+    for (let i = response.data.length - 1; i >= 0; i--) {
+      const review = response.data[i];
+      const match = review.body?.match(
+        new RegExp(`<!-- ${FINGERPRINT_MARKER}:([a-f0-9]+) -->`)
+      );
+      if (match?.[1]) {
+        return match[1];
+      }
+    }
+
+    if (response.data.length < 100) break;
+    page++;
+  }
+
+  return null;
+}
+
 export async function createPullRequestReview(
   octokit: CustomOctokit,
   owner: string,
